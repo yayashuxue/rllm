@@ -2,14 +2,16 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from rllm.workflows.workflow import TerminationReason
+
 
 @dataclass
 class Step:
     chat_completions: list[dict[str, str]] = field(default_factory=list)
 
+    observation: Any = None
     thought: str = ""
     action: Any = None
-    observation: Any = None
     model_response: str = ""
     info: dict = field(default_factory=dict)  # Store any additional info.
 
@@ -32,8 +34,25 @@ class Trajectory:
 
     def to_dict(self):
         return {
+            "task": self.task,
             "steps": [asdict(step) for step in self.steps],
             "reward": float(self.reward),
+        }
+
+
+@dataclass
+class Episode:
+    id: str = ""
+    termination_reason: "TerminationReason" = None
+    is_correct: bool = False
+    trajectories: dict[str, Trajectory] = field(default_factory=dict)  # {agent_name: Trajectory, ...}
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
+            "is_correct": self.is_correct,
+            "trajectories": {k: v.to_dict() for k, v in self.trajectories.items()},
         }
 
 

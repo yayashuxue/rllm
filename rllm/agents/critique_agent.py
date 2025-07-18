@@ -4,34 +4,20 @@ from typing import Any
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 
-class MathAgent(BaseAgent):
-    """
-    A math agent that solves mathematical problems step by step, following the BaseAgent interface.
-    """
+class CritiqueAgent(BaseAgent):
+    """A generic agent that takes an observation of type str."""
 
     def __init__(self, accumulate_thinking=True):
-        """
-        Initialize the MathAgent.
-        """
         self._trajectory = Trajectory()
         self.messages = []
         self.accumulate_thinking = accumulate_thinking
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
-        """Process environment feedback and update internal state."""
+    def update_from_env(self, observation: str, reward: float, done: bool, info: dict, **kwargs):
+        """
+        Updates the agent's internal state after an environment step.
+        """
 
-        # Format observation based on whether it's the initial problem or subsequent feedback
-        if not self.trajectory.steps:
-            # Initial problem presentation
-            assert isinstance(observation, dict) and "question" in observation
-            formatted_observation = observation["question"]
-        elif isinstance(observation, str):
-            formatted_observation = observation
-        else:
-            # Follow-up correction prompt
-            formatted_observation = "Your previous answer may contain a mistake. Please review it carefully and answer again. Put your final answer within \\boxed{}."
-
-        # Update reward on the latest step
+        # If there are previous steps, update the last step's outcome
         if self.trajectory.steps:
             cur_step = self.get_current_state()
             cur_step.reward = reward
@@ -41,12 +27,12 @@ class MathAgent(BaseAgent):
         if done:
             return
 
-        self.messages.append({"role": "user", "content": formatted_observation})
+        self.messages.append({"role": "user", "content": observation})
 
-        new_step = Step(observation=formatted_observation)
+        new_step = Step(observation=observation)
         self._trajectory.steps.append(new_step)
 
-    def update_from_model(self, response: str, **kwargs) -> Action:
+    def update_from_model(self, response: Any, **kwargs):
         """
         Updates the agent's internal state based on the model's response.
         """
@@ -72,7 +58,9 @@ class MathAgent(BaseAgent):
         return action
 
     def reset(self, task: Any = None):
-        """Reset agent state for new episode."""
+        """
+        Resets the agent's internal state for a new episode.
+        """
         self._trajectory = Trajectory(task=task)
         self.messages = []
 
@@ -91,7 +79,7 @@ class MathAgent(BaseAgent):
 
     @property
     def trajectory(self) -> Trajectory:
-        """Return complete interaction trajectory."""
+        """Returns the trajectory object."""
         return self._trajectory
 
     def get_current_state(self) -> Step:

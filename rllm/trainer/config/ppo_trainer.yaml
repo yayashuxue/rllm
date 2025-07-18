@@ -251,8 +251,22 @@ algorithm:
     reweight_method: pow  # ["pow", "max_min", "max_random"]
     weight_pow: 2.0
   # RLLM Arguments
-  mask_truncated_samples: False # Zero gradient for truncated samples (by setting advantage=0)
+  mask_truncated_samples: False # Zero gradient for truncated samples (by setting advantage=0) TODO: test
   clip_advantages: False
+  stepwise_advantage:
+    enable: False
+    mode: broadcast # broadcast or per_step
+    normalize_by_steps: False # only if stepwise_advantage.mode == broadcast
+  compact_filtering:
+    enable: False
+    mask_max_prompt_length_exceeded: True
+    mask_max_response_length_exceeded: True
+    mask_max_turns_exceeded: True
+    mask_timeout: True
+    mask_env_done: False
+  rejection_sample:
+    enable: False
+    multiplier: 3
 
 trainer:
   balance_batch: True
@@ -281,8 +295,9 @@ trainer:
   # The timeout for ray worker group to wait for the register center to be ready
   ray_wait_register_center_timeout: 300
   # RLLM arguments
+  # TODO: deprecate from verl, use gen_batch_size directly like in DAPO
   rejection_sample: False # Reject sample prompts that all succeed or all fail (0 signal for GRPO due to normalization).
-  rejection_sample_multiplier: 2 # Multiple the training batch size by this factor to account for rejection sampling reduction.
+  rejection_sample_multiplier: 3 # Multiple the training batch size by this factor to account for rejection sampling reduction.
   n_training_gpus_per_node: 4 # For verl-pipeline.
 
 ray_init:
@@ -304,3 +319,18 @@ agent:
   stepwise_advantage_mode: "broadcast" 
   agent_args: {}
   engine_args: {}
+
+workflow:
+  use_workflow: False
+  name: single_turn_workflow
+  workflow_args: # only the args required by the workflow
+    max_prompt_length: ${data.max_prompt_length}
+    max_response_length: ${data.max_response_length}
+    accumulate_response_length: ${eval: not algorithm.stepwise_advantage.enable}
+    timeout: null # defaults to 1e6 seconds
+    gamma: 0.0 # no discounting
+    reward_bonus_coeff: 0.0 # no reward shaping
+  disable_thinking: False
+  async_engine: True
+  n_parallel_tasks: 256
+  retry_limit: 3

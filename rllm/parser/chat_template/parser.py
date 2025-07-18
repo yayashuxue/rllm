@@ -1,3 +1,5 @@
+import torch
+
 from .utils import PARSER_TEST_MESSAGES
 
 
@@ -80,6 +82,38 @@ class ChatTemplateParser:
         print(f"No custom parser found. Using default ChatTemplateParser for {tokenizer.name_or_path}")
         assert parser.verify_equivalence(PARSER_TEST_MESSAGES), "Parser failed equivalence check"
         return parser
+
+    def tokenize_and_mask(self, messages):
+        prompt_ids = []
+        response_ids = []
+        response_mask = []
+
+        try:
+            first_assistant_idx = next(i for i, msg in enumerate(messages) if msg["role"] == "assistant")
+        except StopIteration:
+            raise ValueError("No assistant message found in chat_completions") from None
+
+        for i in range(first_assistant_idx):
+            parsed_msg = self.parse([messages[i]], is_first_msg=(i == 0), add_generation_prompt=False)
+            ids = self.tokenizer.encode(parsed_msg, add_special_tokens=False)
+            prompt_ids.extend(ids)
+
+        for i in range(first_assistant_idx, len(messages)):
+            parsed_msg = self.parse([messages[i]], is_first_msg=False, add_generation_prompt=False)
+            ids = self.tokenizer.encode(parsed_msg, add_special_tokens=False)
+            response_ids.extend(ids)
+
+            if messages[i]["role"] == "assistant":
+                # close enough
+                response_mask.extend([1] * len(ids))
+            else:
+                response_mask.extend([0] * len(ids))
+
+        prompt_ids = torch.tensor(prompt_ids, dtype=torch.long)
+        response_ids = torch.tensor(response_ids, dtype=torch.long)
+        response_mask = torch.tensor(response_mask, dtype=torch.long)
+
+        return prompt_ids, response_ids, response_mask
 
 
 class DeepseekQwenChatTemplateParser(ChatTemplateParser):

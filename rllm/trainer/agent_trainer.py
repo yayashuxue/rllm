@@ -14,8 +14,10 @@ class AgentTrainer:
 
     def __init__(
         self,
-        agent_class: type,
-        env_class: type,
+        workflow_class: type | None = None,
+        workflow_args: dict[str, Any] | None = None,
+        agent_class: type | None = None,
+        env_class: type | None = None,
         agent_args: dict[str, Any] | None = None,
         env_args: dict[str, Any] | None = None,
         config: dict[str, Any] | list[str] | None = None,
@@ -36,6 +38,9 @@ class AgentTrainer:
             agent_args: Optional arguments to pass to the agent class
             env_args: Optional arguments to pass to the environment class
         """
+        self.workflow_class = workflow_class
+        self.workflow_args = workflow_args or {}
+
         self.agent_class = agent_class
         self.env_class = env_class
         self.agent_args = agent_args or {}
@@ -52,4 +57,14 @@ class AgentTrainer:
         if not ray.is_initialized():
             ray.init(runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}})
 
-        ray.get(train_agent.remote(self.config, self.agent_class, self.env_class, self.agent_args, self.env_args))
+        ray.get(
+            train_agent.remote(
+                config=self.config,
+                workflow_class=self.workflow_class,
+                workflow_args=self.workflow_args,
+                agent_class=self.agent_class,
+                env_class=self.env_class,
+                agent_args=self.agent_args,
+                env_args=self.env_args,
+            )
+        )
