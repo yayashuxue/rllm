@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from rllm.agents.agent import Episode, Trajectory
+from rllm.agents.agent import Episode
 from rllm.engine.rollout_engine import RolloutEngine
-from rllm.workflows.workflow import TerminationReason, Workflow, run_in_executor
+from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
@@ -36,7 +36,7 @@ class AgentWorkflowEngine:
             return
         self.workflow_queue = asyncio.Queue(maxsize=self.n_parallel_tasks)
         for _ in range(self.n_parallel_tasks):
-            workflow = self.workflow_cls(**self.workflow_args)
+            workflow = self.workflow_cls(rollout_engine=self.rollout_engine, executor=self.executor, **self.workflow_args)
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
             self.workflow_queue.put_nowait(workflow)
 
@@ -49,7 +49,6 @@ class AgentWorkflowEngine:
             task_ids: List of task ids (not unique if n_rollouts > 1)
         """
         if self.workflow_queue is None:
-            print("Engine used in standalone mode, performing lazy initialization...")
             await self.initialize_pool()
 
         async def process_task_with_retry(task: dict, uid: str) -> Episode:
@@ -58,8 +57,7 @@ class AgentWorkflowEngine:
             try:
                 for retry_attempt in range(1, self.retry_limit + 1):
                     try:
-                        await run_in_executor(self.executor, workflow.reset)  # ensure workflow is reset
-                        episode = await workflow(task=task, uid=uid, engine=self, **kwargs)
+                        episode = await workflow(task=task, uid=uid, **kwargs)
                         return episode
                     except Exception as e:
                         print(f"Rollout {uid} failed on attempt {retry_attempt}/{self.retry_limit}: {e}")
@@ -121,20 +119,25 @@ class AgentWorkflowEngine:
 
         for i, episode in enumerate(episodes):
             total_steps = 0
-            for name, trajectory in episode.items():
+
+            if all(len(trajectory.steps) == 0 for trajectory in episode.trajectories.values()):
+                # termination hits before an agent finishes it's first step
+                # (e.g., the initial prompt exceeds max_prompt_length or a timeout occurs)
+                # we delete the episode from the batch by setting repeat_counts to 0
+                print(f"Episode {episode.id} has no valid trajectories, dropping it from the batch")
+                repeat_counts.append(0)
+                continue
+
+            for name, trajectory in episode.trajectories.items():
                 # name: agent identifier, e.g., solver, critic, etc.
-
-                if not isinstance(trajectory, Trajectory):
-                    # episode may contain non-trajectory metadata, e.g., is_correct, etc.
-                    continue
-
-                if len(trajectory.steps) == 0:
-                    # TODO: handle if initial prompt exceeds max_prompt_length
-                    pass
 
                 trajectory_id = f"{task_ids[i]}_{name}"  # unique trajectory identifier e.g., 1234567890_solver
 
-                if not self.config.algorithm.use_stepwise_advantage:  # either single step or accumulated context
+                if len(trajectory.steps) == 0:
+                    print(f"Trajectory {trajectory_id} has no steps, skipping")
+                    continue
+
+                if not self.config.algorithm.stepwise_advantage.enable:  # either single step or accumulated context
                     chat_completions = trajectory.steps[-1].chat_completions
                     prompt, response, mask = self.rollout_engine.chat_parser.tokenize_and_mask(chat_completions)
 
@@ -145,7 +148,7 @@ class AgentWorkflowEngine:
                     step_rewards.append(trajectory.reward)
                     step_ids.append(trajectory_id)
 
-                else:  # self.config.algorithm.use_stepwise_advantage==True
+                else:  # self.config.algorithm.stepwise_advantage.enable==True
                     for step_idx, step in enumerate(trajectory.steps):
                         chat_completions = step.chat_completions
 
@@ -162,7 +165,7 @@ class AgentWorkflowEngine:
                         step_id = f"{trajectory_id}_step{step_idx}"  # unique step identifier e.g., 1234567890_solver_step0
                         step_ids.append(step_id)
 
-                n_steps = len(trajectory.steps) if self.config.algorithm.use_stepwise_advantage else 1
+                n_steps = len(trajectory.steps) if self.config.algorithm.stepwise_advantage.enable else 1
                 trajectory_ids.extend([trajectory_id] * n_steps)
                 step_nums.extend([n_steps] * n_steps)
                 traj_rewards.extend([trajectory.reward] * n_steps)
@@ -171,7 +174,7 @@ class AgentWorkflowEngine:
                 total_steps += n_steps
 
             episode_ids.extend([episode.id] * total_steps)
-            is_correct.extend([episode.get("is_correct", False)] * total_steps)
+            is_correct.extend([episode.is_correct] * total_steps)
             termination_reasons.extend([episode.termination_reason] * total_steps)
             repeat_counts.append(total_steps)
 
@@ -196,7 +199,7 @@ class AgentWorkflowEngine:
         input_ids = torch.concat([prompts_batch, response_batch], dim=1)
         attention_mask = torch.where(input_ids != self.rollout_engine.tokenizer.pad_token_id, 1, 0)
         position_ids = (torch.cumsum(attention_mask, dim=1) - 1) * attention_mask
-        if not traj_mask:  # i.e. self.config.algorithm.use_stepwise_advantage is True
+        if not traj_mask:  # i.e. self.config.algorithm.stepwise_advantage.enable is True
             traj_mask = torch.where(response_batch != self.rollout_engine.tokenizer.pad_token_id, 1, 0)
         else:
             traj_mask = torch.nn.utils.rnn.pad_sequence(traj_mask, batch_first=True, padding_value=0)
@@ -215,11 +218,13 @@ class AgentWorkflowEngine:
 
         # compact filtering
         cf = self.config.algorithm.compact_filtering
+        is_valid = [True] * len(episode_ids)
         if cf.enable:
-            for i in range(traj_mask.shape[0]):
+            for i in range(episode_ids):
                 termination_reason = termination_reasons[i]
                 if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE):
-                    traj_mask[i, :] = 0
+                    # set flag to filter out the episode later
+                    is_valid[i] = False
 
         return DataProto.from_dict(
             tensors={
@@ -241,6 +246,7 @@ class AgentWorkflowEngine:
                 "step_nums": np.array(step_nums),
                 "is_correct": np.array(is_correct),
                 "termination_reasons": np.array([x.value for x in termination_reasons]),
+                "is_valid": np.array(is_valid),
                 "is_last_step": np.array(is_last_step),
                 "is_pad_step": np.array([False] * len(episode_ids)),
             },

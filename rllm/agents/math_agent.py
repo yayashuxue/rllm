@@ -71,9 +71,9 @@ class MathAgent(BaseAgent):
 
         return action
 
-    def reset(self, task: Any = None):
+    def reset(self):
         """Reset agent state for new episode."""
-        self._trajectory = Trajectory(task=task)
+        self._trajectory = Trajectory()
         self.messages = []
 
     @property

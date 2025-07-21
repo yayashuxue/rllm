@@ -1,5 +1,5 @@
 from rllm.agents.agent import Episode
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination, run_in_executor
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination
 
 
 class MultiTurnWorkflow(Workflow):
@@ -21,31 +21,29 @@ class MultiTurnWorkflow(Workflow):
         sampling_params = dict(sampling_params) if sampling_params is not None else {}
 
         self.agent = agent_cls(**agent_args)
+        self.register_agent(self.agent)
         self.env = env_cls(**env_args)
         self.max_steps = max_steps
         self.sampling_params = sampling_params
 
     @handle_termination
-    async def __call__(self, task: dict, uid: str, engine, **kwargs) -> Episode:
+    async def __call__(self, task: dict, uid: str, **kwargs) -> Episode:
         """Execute a multi-step workflow"""
 
-        # Reset environment using executor
-        observation, info = await run_in_executor(engine.executor, self.env.reset, task)
-        self.agent.reset(task=task)
+        observation, info = await self.run_in_executor(self.reset, task=task, uid=uid)  # returns observation and info from the environment
+
         self.agent.update_from_env(observation, 0, False, info)
 
         for step in range(1, self.max_steps + 1):
-            prompt = self.agent.chat_completions
-            response = await self.get_model_response(engine.rollout_engine, prompt, uid, **self.sampling_params)
+            response = await self.get_model_response(self.agent, **self.sampling_params)
             action = self.agent.update_from_model(response)
 
-            # Environment step using executor
-            next_obs, reward, done, info = await run_in_executor(engine.executor, self.env.step, action)
+            next_obs, reward, done, info = await self.run_in_executor(self.env.step, action)
             self.agent.update_from_env(next_obs, reward, done, info)
 
             if step >= self.max_steps:
-                raise TerminationEvent(TerminationReason.MAX_TURNS_REACHED)
+                raise TerminationEvent(TerminationReason.MAX_TURNS_EXCEEDED)
             if done:
                 raise TerminationEvent(TerminationReason.ENV_DONE)
 
-        raise TerminationEvent(TerminationReason.MAX_TURNS_REACHED)
+        raise TerminationEvent(TerminationReason.ENV_DONE)

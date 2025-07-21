@@ -1,5 +1,5 @@
 from rllm.agents.agent import Episode
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination, run_in_executor
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination
 
 
 class SingleTurnWorkflow(Workflow):
@@ -20,20 +20,19 @@ class SingleTurnWorkflow(Workflow):
         sampling_params = dict(sampling_params) if sampling_params is not None else {}
 
         self.agent = agent_cls(**agent_args)
+        self.register_agent(self.agent)
         self.env = env_cls(**env_args)
         self.sampling_params = sampling_params
 
     @handle_termination
-    async def __call__(self, task: dict, uid: str, engine, **kwargs) -> Episode:
-        observation, info = await run_in_executor(engine.executor, self.env.reset, task)
-        self.agent.reset(task)
+    async def __call__(self, task: dict, uid: str, **kwargs) -> Episode:
+        observation, info = await self.run_in_executor(self.reset, task=task, uid=uid)  # returns observation and info from the environment
         self.agent.update_from_env(observation, 0, False, info)
 
-        prompt = self.agent.chat_completions
-        response = await self.get_model_response(engine.rollout_engine, prompt, uid, **self.sampling_params)
+        response = await self.get_model_response(self.agent, **self.sampling_params)
         action = self.agent.update_from_model(response)
 
-        next_obs, reward, done, info = await run_in_executor(engine.executor, self.env.step, action)
+        next_obs, reward, done, info = await self.run_in_executor(self.env.step, action)
         self.agent.update_from_env(next_obs, reward, done, info)
 
-        raise TerminationEvent(TerminationReason.ENV_DONE if done else TerminationReason.MAX_TURNS_REACHED)
+        raise TerminationEvent(TerminationReason.ENV_DONE)

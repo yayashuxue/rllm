@@ -4,15 +4,14 @@ from copy import deepcopy
 
 from transformers import AutoTokenizer
 
-from rllm.agents.critique_agent import CritiqueAgent
 from rllm.agents.math_agent import MathAgent
 from rllm.data.dataset_types import TestDataset
 from rllm.data.utils import load_dataset
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout_engine import RolloutEngine
-from rllm.environments.base.critique_env import CritiqueEnvironment
+from rllm.environments.base.single_turn_env import SingleTurnEnvironment
 from rllm.rewards.reward_fn import math_reward_fn
-from rllm.workflows.critique_workflow import CritiqueWorkflow
+from rllm.workflows.single_turn_workflow import SingleTurnWorkflow
 
 
 def load_data(n=1, dataset_enum=None):
@@ -44,11 +43,9 @@ def evaluate_results(results):
     problem_total_map = defaultdict(int)
 
     # Count correct answers for each problem
-    for trajectories in results:
-        trajectory = trajectories[0]
-        problem = trajectory.steps[0].observation
-
-        is_correct = 1 if trajectory.reward > 0 else 0
+    for episode in results:
+        problem = episode.task["question"]
+        is_correct = episode.is_correct
 
         problem_correct_map[problem] += is_correct
         problem_total_map[problem] += 1
@@ -70,7 +67,7 @@ if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
     # Create the environment (no batch_size parameter)
-    n_parallel_tasks = 256
+    n_parallel_tasks = 30
 
     model_name = "Qwen/Qwen3-4B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -86,32 +83,25 @@ if __name__ == "__main__":
     )
 
     engine = AgentWorkflowEngine(
-        workflow_cls=CritiqueWorkflow,
+        workflow_cls=SingleTurnWorkflow,
         workflow_args={
-            "solver_cls": MathAgent,
-            "critic_cls": CritiqueAgent,
-            "env_cls": CritiqueEnvironment,
-            "solver_args": {"accumulate_thinking": False},
-            "critic_args": {"accumulate_thinking": False},
+            "agent_cls": MathAgent,
+            "env_cls": SingleTurnEnvironment,
+            "agent_args": {"accumulate_thinking": False},
             "env_args": {"reward_fn": math_reward_fn},
-            "max_prompt_length": 16384,
+            "max_prompt_length": 4096,
             "max_response_length": 16384,
             "sampling_params": {"temperature": 0.6, "top_p": 0.95, "model": model_name},
-            "enforce_max_prompt_length": True,
-            "accumulate_response_length": True,
         },
         rollout_engine=rollout_engine,
         config=None,
         n_parallel_tasks=n_parallel_tasks,
     )
 
-    engine.init_workflows()
-
-    tasks = load_data(n=16, dataset_enum=TestDataset.Math.AIME)
+    tasks = load_data(n=1, dataset_enum=TestDataset.Math.AIME)
 
     results = asyncio.run(engine.execute_tasks(tasks))
     evaluate_results(results)
 
-    results = [[traj.to_dict() for traj in result] for result in results]
-    with open("logs/test.json", "w") as f:
-        json.dump(results, f, indent=4)
+    with open("logs/math_workflow.json", "w") as f:
+        json.dump([episode.to_dict() for episode in results], f, indent=4)

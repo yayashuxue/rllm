@@ -1,7 +1,9 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -14,14 +16,14 @@ from rllm.environments.base.base_env import BaseEnv
 def handle_termination(func: Callable):
     """Decorator that handles termination errors and breaks the loop"""
 
-    async def wrapper(self, task: dict, uid: str, engine, **kwargs):
+    async def wrapper(self, task: dict, uid: str, **kwargs):
         try:
-            coro = func(self, task, uid, engine, **kwargs)
+            coro = func(self, task, uid, **kwargs)
             return await asyncio.wait_for(coro, timeout=self.timeout)
         except asyncio.TimeoutError:
-            return self.postprocess_episode(self.collect_trajectories(), uid, TerminationReason.TIMEOUT)
+            return self.postprocess_episode(self.collect_trajectories(), TerminationReason.TIMEOUT)
         except TerminationEvent as e:
-            return self.postprocess_episode(self.collect_trajectories(), uid, e.reason)
+            return self.postprocess_episode(self.collect_trajectories(), e.reason)
 
     return wrapper
 
@@ -40,13 +42,10 @@ class TerminationEvent(Exception):
         self.reason = reason
 
 
-async def run_in_executor(executor, fn, *args, **kwargs):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, fn, *args, **kwargs)
-
-
 class Workflow(ABC):
-    def __init__(self, max_prompt_length=4096, max_response_length=8192, accumulate_response_length=True, timeout=None, gamma=0.0, reward_bonus_coeff=0.0, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, executor: ThreadPoolExecutor, max_prompt_length=4096, max_response_length=8192, accumulate_response_length=True, timeout=None, gamma=0.0, reward_bonus_coeff=0.0, **kwargs):
+        self.rollout_engine = rollout_engine
+        self.executor = executor
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
         self.accumulate_response_length = accumulate_response_length
@@ -58,15 +57,14 @@ class Workflow(ABC):
 
     @abstractmethod
     @handle_termination
-    async def __call__(self, task: dict, uid: str, engine, **kwargs) -> Episode:
+    async def __call__(self, task: dict, uid: str, **kwargs) -> Episode:
         """Execute the workflow on a single task"""
         pass
 
     def register_agent(self, agent: BaseAgent, rollout_engine: RolloutEngine | None = None) -> None:
         """Register an agent and its rollout engine"""
-        # could also make these attributes of the agent instead of using the registry
         self.agent_registry[agent] = {
-            "rollout_engine": rollout_engine,
+            "rollout_engine": rollout_engine or self.rollout_engine,
             "accumulated_response_length": 0,
         }
 
@@ -84,13 +82,15 @@ class Workflow(ABC):
 
             # Check if attribute is a BaseAgent instance
             if isinstance(attr_value, BaseAgent) and hasattr(attr_value, "trajectory"):
-                episode.trajectories[attr_name] = attr_value
+                episode.trajectories[attr_name] = attr_value.trajectory
 
             # Also check if it's a list/tuple containing BaseAgent instances
             elif isinstance(attr_value, list | tuple):
                 for i, item in enumerate(attr_value):
                     if isinstance(item, BaseAgent) and hasattr(item, "trajectory"):
-                        episode.trajectories[f"{attr_name}_{i}"] = attr_value
+                        episode.trajectories[f"{attr_name}_{i}"] = attr_value.trajectory
+
+        assert len(episode.trajectories) > 0, "No trajectories found in the workflow"
 
         return episode
 
@@ -130,16 +130,17 @@ class Workflow(ABC):
             total_reward += trajectory.reward
         episode.is_correct = total_reward > 0
 
-    def postprocess_episode(self, episode: Episode, uid: str, termination_reason: TerminationReason = None) -> Episode:
+    def postprocess_episode(self, episode: Episode, termination_reason: TerminationReason = None) -> Episode:
         """Collect and process the trajectories"""
         assert episode is not None, "Remember to call collect_trajectories() before postprocessing the episode"
 
-        # 1. assign a task id
-        episode.id = uid
+        # 1. assign a task id and task
+        episode.id = self.uid
+        episode.task = self.task
 
         for agent_name, trajectory in episode.trajectories.items():
             # depending on the terminaiton reason, there should be a trajectry with an additional step with empty chat_completions
-            # should only happen with TerminationReason.PROMPT_LENGTH_EXCEEDED
+            # should only happen with TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED
             if len(trajectory.steps[-1].chat_completions) == 0:
                 del trajectory.steps[-1]
 
@@ -158,26 +159,28 @@ class Workflow(ABC):
 
         return episode
 
-    def reset(self, task: dict | None = None) -> None:
+    def reset(self, task: dict | None = None, uid: str | None = None) -> tuple[Any, dict]:
         """Reset all agents and environments for reuse"""
+
+        # set the uid and task
+        self.uid = uid
+        self.task = task
+
+        # reset the agents in the registry
+        for agent in self.agent_registry:
+            agent.reset()
+            agent.trajectory.task = task
+            self.agent_registry[agent]["accumulated_response_length"] = 0  # reset response length counter
+
+        # reset environments (look for class attributes that are BaseEnv subclasses
         for attr_name in dir(self):
-            # Skip private attributes and methods
             if attr_name.startswith("_"):
                 continue
-
             attr_value = getattr(self, attr_name)
+            if isinstance(attr_value, BaseEnv) and hasattr(attr_value, "reset"):
+                return attr_value.reset(task=task)
 
-            # Check if attribute is a BaseAgent or BaseEnv instance
-            if isinstance(attr_value, BaseAgent | BaseEnv) and hasattr(attr_value, "reset"):
-                attr_value.reset(task)
-
-            # Also check if it's a list/tuple containing BaseAgent or BaseEnv instances
-            elif isinstance(attr_value, list | tuple):
-                for item in attr_value:
-                    if isinstance(item, BaseAgent | BaseEnv) and hasattr(item, "reset"):
-                        item.reset(task)
-
-        self.accumulated_response_length = 0
+        raise ValueError("No environment found in the workflow")
 
     def is_multithread_safe(self) -> bool:
         """Check if the workflow is multithread safe"""
@@ -189,16 +192,20 @@ class Workflow(ABC):
                 return False
         return True
 
-    async def get_model_response(self, agent: BaseAgent, uid: str, rollout_engine: RolloutEngine | None = None, **kwargs) -> str | dict:
+    async def run_in_executor(self, fn, *args, **kwargs):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, partial(fn, *args, **kwargs))
+
+    async def get_model_response(self, agent: BaseAgent, messages: list[dict] | None = None, **kwargs) -> str:
         """Get the model response for the given messages"""
 
-        if rollout_engine is not None and self.agent_registry[agent]["rollout_engine"] is not None:  # ambigious case of multiple rollout engines
-            print(f"workflow.get_model_response was passed a workflow engine, but {type(agent)} was registed with a rollout engine. Defaulting to registed rollout engine.")
-            rollout_engine = self.agent_registry[agent]["rollout_engine"]
-        elif rollout_engine is None:
-            rollout_engine = self.agent_registry[agent]["rollout_engine"]
+        if agent not in self.agent_registry:
+            raise ValueError(f"Agent {agent} is not registered with the workflow. Please call register_agent() during initialization.")
 
-        messages = agent.chat_completions
+        rollout_engine = self.agent_registry[agent]["rollout_engine"]
+        # TODO: add post init logic to ensure at least one agent is using the workflow engine's rollout engine
+
+        messages = messages or agent.chat_completions
 
         assert messages[-1]["role"] != "assistant", "Prefilling the assistant message is not supported"
 
@@ -206,8 +213,8 @@ class Workflow(ABC):
         prompt = rollout_engine.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
         prompt_length = len(rollout_engine.tokenizer.encode(prompt))
         if prompt_length > self.max_prompt_length:
-            print(f"Prompt length {prompt_length} exceeds max prompt length {self.max_prompt_length} for rollout {uid}")
-            raise TerminationEvent(TerminationReason.PROMPT_LENGTH_EXCEEDED)
+            print(f"Prompt length {prompt_length} exceeds max prompt length {self.max_prompt_length} for rollout {self.uid}")
+            raise TerminationEvent(TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED)
 
         # We deal with response length in one of two ways:
         # 1. If accumulate_response_length==True, then we keep a running counter of the accumulated response length seperately for each agent in the workflow
@@ -225,14 +232,17 @@ class Workflow(ABC):
 
             max_tokens = self.max_response_length - accumulated_response_length
             if max_tokens <= 0:
-                print(f"Rollout {uid} reached max response length")
-                raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_REACHED)
+                print(f"Rollout {self.uid} reached max response length")
+                raise TerminationEvent(TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED)
 
             self.agent_registry[agent]["accumulated_response_length"] = accumulated_response_length
         else:
             max_tokens = self.max_response_length
 
-        response = await rollout_engine.get_model_response(messages, application_id=uid, max_tokens=max_tokens, **kwargs)
+        response = await rollout_engine.get_model_response(messages, application_id=self.uid, max_tokens=max_tokens, **kwargs)
+
+        # TODO: throw TerminationEvent.MAX_RESPONSE_LENGTH_EXCEEDED based on response (requires reconfiguring the rollout engine and router)
+        # ideally the rollout_engine returns the response dict (e.g., CompletionOutput or ChatCompletionOutput)
 
         if self.accumulate_response_length:
             # TODO: technically, we're undercounting here a bit (e.g., by 2 per turn for Qwen3) because the chat

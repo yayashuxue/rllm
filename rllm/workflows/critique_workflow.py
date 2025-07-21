@@ -1,5 +1,5 @@
 from rllm.agents.agent import Episode
-from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination, run_in_executor
+from rllm.workflows.workflow import TerminationEvent, TerminationReason, Workflow, handle_termination
 
 
 class CritiqueWorkflow(Workflow):
@@ -24,6 +24,11 @@ class CritiqueWorkflow(Workflow):
 
         self.solver = solver_cls(**solver_args)
         self.critic = critic_cls(**critic_args)
+
+        # both use the default rollout engine (from the workflow engine)
+        self.register_agent(self.solver)
+        self.register_agent(self.critic)
+
         self.env = env_cls(**env_args)
         self.sampling_params = sampling_params
 
@@ -31,32 +36,28 @@ class CritiqueWorkflow(Workflow):
         self.OBSERVATION_PROMPT = """### Critique\n{critique}\n\nUsing the critique, refine your previous answer."""
 
     @handle_termination
-    async def __call__(self, task: dict, uid: str, engine, **kwargs) -> Episode:
+    async def __call__(self, task: dict, uid: str, **kwargs) -> Episode:
         """Execute a multi-step workflow"""
 
-        # Reset environment using executor
-        observation, info = await run_in_executor(engine.executor, self.env.reset, task)
-        self.solver.reset(task=task)
-        self.critic.reset()
+        observation, info = await self.run_in_executor(self.reset, task=task, uid=uid)  # returns observation and info from the environment
 
         self.solver.update_from_env(observation, 0, False, info)
-        response = await self.get_model_response(self.solver, uid, engine.rollout_engine, **self.sampling_params)
+        response = await self.get_model_response(self.solver, **self.sampling_params)
         action = self.solver.update_from_model(response)
 
-        # Environment step using executor
-        _, reward, done, info = await run_in_executor(engine.executor, self.env.step, action)
+        _, reward, done, info = await self.run_in_executor(self.env.step, action)
 
         critic_prompt = self.CRITIQUE_PROMPT.format(question=task.get("question", ""), answer=action.action)  # TODO: just the action?
         self.critic.update_from_env(critic_prompt, 0, False, info)
-        critic_response = await self.get_model_response(engine.rollout_engine, self.critic.chat_completions, uid, **self.sampling_params)
+        critic_response = await self.get_model_response(self.critic, **self.sampling_params)
         critique = self.critic.update_from_model(critic_response)
 
         next_obs = self.OBSERVATION_PROMPT.format(critique=critique.action)
         self.solver.update_from_env(next_obs, reward, done, info)
-        response = await self.get_model_response(engine.rollout_engine, self.solver.chat_completions, uid, **self.sampling_params)
+        response = await self.get_model_response(self.solver, **self.sampling_params)
         action = self.solver.update_from_model(response)
 
-        _, reward, done, info = await run_in_executor(engine.executor, self.env.step, action)
+        _, reward, done, info = await self.run_in_executor(self.env.step, action)
         self.solver.update_from_env(None, reward, done, info)
         self.critic.update_from_env(None, reward, done, info)  # give critic the solver's final reward
 

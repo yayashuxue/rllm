@@ -2,8 +2,6 @@ from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from rllm.workflows.workflow import TerminationReason
-
 
 @dataclass
 class Step:
@@ -43,15 +41,17 @@ class Trajectory:
 @dataclass
 class Episode:
     id: str = ""
-    termination_reason: "TerminationReason" = None
+    task: Any = None
+    termination_reason = None
     is_correct: bool = False
     trajectories: dict[str, Trajectory] = field(default_factory=dict)  # {agent_name: Trajectory, ...}
 
     def to_dict(self):
         return {
             "id": self.id,
+            "task": self.task,
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
-            "is_correct": self.is_correct,
+            "is_correct": bool(self.is_correct),
             "trajectories": {k: v.to_dict() for k, v in self.trajectories.items()},
         }
 

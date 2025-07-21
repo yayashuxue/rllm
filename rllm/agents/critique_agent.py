@@ -57,11 +57,11 @@ class CritiqueAgent(BaseAgent):
 
         return action
 
-    def reset(self, task: Any = None):
+    def reset(self):
         """
         Resets the agent's internal state for a new episode.
         """
-        self._trajectory = Trajectory(task=task)
+        self._trajectory = Trajectory()
         self.messages = []
 
     @property
