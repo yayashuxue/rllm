@@ -5,7 +5,7 @@ from rllm.data.dataset import DatasetRegistry
 from rllm.environments.base.single_turn_env import SingleTurnEnvironment
 from rllm.rewards.reward_fn import math_reward_fn
 from rllm.trainer.agent_trainer import AgentTrainer
-from rllm.workflows.multi_turn_workflow import MultiTurnWorkflow
+from rllm.workflows.single_turn_workflow import SingleTurnWorkflow
 
 
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="ppo_trainer", version_base=None)
@@ -14,7 +14,7 @@ def main(config):
     test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
 
     trainer = AgentTrainer(
-        workflow_class=MultiTurnWorkflow,
+        workflow_class=SingleTurnWorkflow,
         workflow_args={
             "agent_cls": MathAgent,
             "agent_args": {"accumulate_thinking": False},

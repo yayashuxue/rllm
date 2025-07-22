@@ -36,8 +36,9 @@ def train_agent(config, workflow_class=None, workflow_args=None, agent_class=Non
 
     from verl.utils.fs import copy_local_path_from_hdfs
 
-    pprint(OmegaConf.to_container(config, resolve=True))  # resolve=True will eval symbol values
+    OmegaConf.register_new_resolver("eval", lambda x: eval(x))
     OmegaConf.resolve(config)
+    pprint(OmegaConf.to_container(config))
 
     # download the checkpoint from hdfs
     local_path = copy_local_path_from_hdfs(config.actor_rollout_ref.model.path)

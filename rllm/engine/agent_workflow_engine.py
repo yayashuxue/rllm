@@ -220,7 +220,7 @@ class AgentWorkflowEngine:
         cf = self.config.algorithm.compact_filtering
         is_valid = [True] * len(episode_ids)
         if cf.enable:
-            for i in range(episode_ids):
+            for i in range(len(episode_ids)):
                 termination_reason = termination_reasons[i]
                 if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE):
                     # set flag to filter out the episode later

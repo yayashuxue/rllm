@@ -24,7 +24,6 @@ from verl.trainer.ppo.ray_trainer import (
     _timer,
     compute_advantage,
     compute_data_metrics,
-    compute_response_mask,
     compute_timing_metrics,
     reduce_metrics,
 )
@@ -128,6 +127,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         solve_partial = 0
         num_tasks = 0
         termination_counts = Counter()
+        metrics = {}
+        timing_raw = {}
 
         for epoch in range(self.config.trainer.total_epochs):
             # pprint(f"epoch {epoch}, step {self.global_steps} started")
@@ -140,9 +141,6 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     repeat_times=self.config.actor_rollout_ref.rollout.n,
                     interleave=True,
                 )
-
-                metrics = {}  # fix metrics to consider complete batch if rejection sampling is used
-                timing_raw = {}
 
                 new_batch.pop(batch_keys=["input_ids", "attention_mask", "position_ids"], non_tensor_batch_keys=["raw_prompt_ids"])
                 new_batch.meta_info = {
@@ -159,36 +157,45 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                     final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
                     new_batch = new_batch.union(final_gen_batch_output)
 
+                    # rejection sampling (at the task level)
+                    # we do rejection sampling at the task level instead of the step level
+                    # in multi-step workflows, this can be overly optimistic
+                    # (e.g., turn 1 all incorrect and turn 2 all correct -> keep the uid, but once we group by step both turns get have 0 advantage)
+                    # but stepwise rejection sampling will not work for the broadcast mode since we cannot drop the last step and keep earlier steps
                     uids = new_batch.non_tensor_batch["task_ids"]
                     unique_uids = np.unique(uids)
-                    valid_mask = torch.ones(len(uids), dtype=torch.bool)
+                    is_correct = new_batch.non_tensor_batch["is_correct"]
+                    is_valid = new_batch.non_tensor_batch["is_valid"]  # exclude items that will be filtered out later
+                    drop_uids = set()
 
                     for uid in unique_uids:
-                        uid_mask = uids == uid
-                        uid_is_correct = new_batch[uid_mask].non_tensor_batch["is_correct"]
+                        candidate_rows = (uids == uid) & is_valid
+                        candidate_is_correct = is_correct[candidate_rows]
 
                         # Check if all episodes are correct or incorrect
-                        if not uid_is_correct.any():
-                            valid_mask[uid_mask] = False
+                        if not candidate_is_correct.any():  # also catches case where not candidate_rows.any() i.e., all rows are invalid
+                            drop_uids.add(uid)
                             solve_none += 1
-                        elif uid_is_correct.all():
-                            valid_mask[uid_mask] = False
+                        elif candidate_is_correct.all():
+                            drop_uids.add(uid)
                             solve_all += 1
                         else:
                             solve_partial += 1
 
-                        # collect and log termination reasons
-                        termination_reasons = new_batch[uid_mask].non_tensor_batch["termination_reasons"]
-                        termination_counts.update(termination_reasons)
+                    # collect and log termination reasons
+                    termination_reasons = new_batch.non_tensor_batch["termination_reasons"]
+                    termination_counts.update(termination_reasons)
 
                     # If no valid samples remain, skip this batch and get a new one
-                    if not valid_mask.any():
+                    if len(drop_uids) == len(unique_uids):
+                        print("No valid samples remain, skipping batch")
                         continue
 
                     if not self.config.algorithm.rejection_sample.enable:
                         batch = new_batch
                     else:
-                        new_batch = new_batch[valid_mask]
+                        rejection_mask = np.isin(uids, list(drop_uids))
+                        new_batch = new_batch[~rejection_mask]
                         if batch is None:
                             batch = new_batch
                         else:
@@ -198,6 +205,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             continue
                         else:
                             # randomly select bsz task uids from batch, then filter batch to only contain these tasks
+                            # TODO: add heuristic for selecting train_batch_size uids
                             uids = batch.non_tensor_batch["task_ids"]
                             unique_uids = np.unique(uids)
                             assert len(unique_uids) >= self.config.data.train_batch_size, "Not enough unique uids to sample from"
@@ -205,7 +213,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             selected_mask = np.isin(uids, selected_uids)
                             batch = batch[selected_mask]
 
-                    if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage_mode == "broadcast":
+                    if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage.mode == "broadcast":
                         # need to make sure both number of last steps (number of uids) and number of total steps in the batch
                         # (batch size after processing) are both multiples of world size
 
@@ -218,10 +226,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
                         # round down last_step_batch to make sure its multiple of world size
                         num_trainer_replicas = self.actor_rollout_wg.world_size
-                        max_batch_size = (
-                            last_step_batch.batch["input_ids"].shape[0]  # 1 per trajectory
-                            // num_trainer_replicas
-                        ) * num_trainer_replicas
+                        max_batch_size = (last_step_batch.batch["input_ids"].shape[0] // num_trainer_replicas) * num_trainer_replicas
 
                         size_mask = torch.zeros(last_step_batch.batch["input_ids"].shape[0], dtype=torch.bool)
                         size_mask[:max_batch_size] = True
@@ -259,7 +264,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
 
-                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage_mode == "per_step":
+                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage.mode == "per_step":
                             batch.batch["token_level_scores"] = batch.batch["step_rewards"]
                             batch.batch["token_level_rewards"] = batch.batch["step_rewards"]
                         else:
@@ -269,7 +274,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         # if we're not using computing advantages stepwise (i.e., for cumulative agents) step_ids == trajectory_ids
                         batch.non_tensor_batch["uid"] = batch.non_tensor_batch["step_ids"]
 
-                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage_mode == "broadcast":
+                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage.mode == "broadcast":
                             is_last_step = batch.non_tensor_batch["is_last_step"]
                             last_step_indices = np.where(is_last_step == True)[0]
                             not_last_step_indices = np.where(is_last_step == False)[0]
@@ -289,10 +294,15 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                             clip_advantages=self.config.algorithm.clip_advantages,
                         )
 
-                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage_mode == "broadcast":
+                        if self.config.algorithm.stepwise_advantage.enable and self.config.algorithm.stepwise_advantage.mode == "broadcast":
                             # Merging the separated out steps using the advantage from last steps
-                            self._stepwise_advantage_broadcast(batch, other_step_batch=non_last_step_batch)
+                            self._stepwise_advantage_broadcast(batch, non_last_step_batch)
                             batch = DataProto.concat([batch, non_last_step_batch])
+
+                    # remove invalid items filtered out due to compact filtering
+                    is_valid = batch.non_tensor_batch["is_valid"]
+                    valid_idxs = np.where(is_valid == True)[0]
+                    batch = batch.select_idxs(valid_idxs)
 
                     # re-pad batch size to world size for gradient update
                     batch = self._pad_dataproto_to_world_size(batch=batch)
@@ -330,7 +340,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
 
-                # collect metrics
+                # collect and logmetrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
 
@@ -352,6 +362,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 solve_partial = 0
                 num_tasks = 0
                 termination_counts = Counter()
+                metrics = {}
+                timing_raw = {}
 
                 self.global_steps += 1
 
@@ -448,56 +460,47 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
         return final_gen_batch_output
 
-    def _stepwise_advantage_broadcast(self, last_step_batch, other_step_batch):
+    def _stepwise_advantage_broadcast(self, last_step_batch, non_last_step_batch):
         """
-        Broadcast the advantage from last_step_batch to all other steps.
+        Broadcast the advantage from last_step_batch to all other steps within the same episode and trajectory.
         """
 
         # NOTE: Currently takes the average of advantages. For GRPO, advantage and returns is uniform for each token so this makes no difference.
         # NOTE: For simplicity, assumes advantage and return is the same, which also holds for GRPO variants
 
-        # TODO: Should the advantages be broadcast over loss masked tokens?
-
-        max_response_length = self.config.data.max_response_length
-        src_mask = last_step_batch.batch["attention_mask"][:, -max_response_length:]
-        tgt_mask = last_step_batch.batch["attention_mask"][:, -max_response_length:]
-
-        # TODO: finish
-
-        if "response_mask" not in other_step_batch.batch.keys():
-            other_step_batch.batch["response_mask"] = compute_response_mask(other_step_batch)
-        if "response_mask" not in last_step_batch.batch.keys():
-            last_step_batch.batch["response_mask"] = compute_response_mask(last_step_batch)
-        src_indices = last_step_batch.non_tensor_batch["idxs"]
-        src_total_steps = last_step_batch.non_tensor_batch["step_nums"]
-        tgt_indices = other_step_batch.non_tensor_batch["idxs"]
-        src_advantages = last_step_batch.batch["advantages"]
+        src_traj_ids = last_step_batch.non_tensor_batch["trajectory_ids"]
+        src_eps_ids = last_step_batch.non_tensor_batch["episode_ids"]
+        src_steps = last_step_batch.non_tensor_batch["step_nums"]
         src_mask = last_step_batch.batch["response_mask"]
-        tgt_mask = other_step_batch.batch["response_mask"]
+        src_advantages = last_step_batch.batch["advantages"]
 
-        # Build idx -> scalar advantage
-        idx_to_scalar_adv = {}
-        for i, idx in enumerate(src_indices):
+        tgt_traj_ids = non_last_step_batch.non_tensor_batch["trajectory_ids"]
+        tgt_eps_ids = non_last_step_batch.non_tensor_batch["episode_ids"]
+        tgt_mask = non_last_step_batch.batch["response_mask"]
+
+        # Build id -> scalar advantage
+        traj_ep_to_scalar_adv = {}
+        for i, (traj_id, eps_id) in enumerate(zip(src_traj_ids, src_eps_ids, strict=False)):
             mask = src_mask[i].bool()
             scalar = src_advantages[i][mask].mean()
 
-            if self.config.algorithm.normalize_step_advantage:
+            if self.config.algorithm.stepwise_advantage.normalize_by_steps:
                 # normalize the advantage against number of steps
-                scalar = scalar / src_total_steps[i]
+                scalar = scalar / src_steps[i]
                 # reassign the normalized advantage to last_step_batch as well
                 last_step_batch.batch["advantages"][i][mask] = scalar
 
-            idx_to_scalar_adv[int(idx)] = scalar
+            traj_ep_to_scalar_adv[(traj_id, eps_id)] = scalar
 
-        # Create new tensor for other_step_batch with per-token assignment
-        scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=idx_to_scalar_adv[int(idx)], dtype=torch.float32) for i, idx in enumerate(tgt_indices)])  # shape: (N2, T)
+        # Create new tensor for non_last_step_batch with per-token assignment
+        scalar_rows = torch.stack([torch.full_like(tgt_mask[i], fill_value=traj_ep_to_scalar_adv[(traj_id, eps_id)], dtype=torch.float32) for i, (traj_id, eps_id) in enumerate(zip(tgt_traj_ids, tgt_eps_ids, strict=False))])  # shape: (N2, T)
 
         # Apply the response mask of the target batch
         final_advantage = scalar_rows * tgt_mask
 
         # Assignment
-        other_step_batch.batch["advantages"] = final_advantage
-        other_step_batch.batch["returns"] = final_advantage
+        non_last_step_batch.batch["advantages"] = final_advantage
+        non_last_step_batch.batch["returns"] = final_advantage
 
     def _pad_dataproto_to_world_size(self, batch):
         world_sizes = []
@@ -529,8 +532,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             idx = original_batch_size + i
             batch.non_tensor_batch["is_last_step"][idx] = False
             batch.non_tensor_batch["is_pad_step"][idx] = True
-            batch.batch["traj_mask"][idx, :] = 0
-            batch.batch["response_mask"][idx, :] = 0
+            batch.non_tensor_batch["is_valid"][idx] = False
 
         return batch
 
