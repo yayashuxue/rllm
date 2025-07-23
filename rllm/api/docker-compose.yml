@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  rllm-api:
+    build: 
+      context: ../..
+      dockerfile: rllm/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_NAME=Qwen/Qwen3-4B
+      - OPENAI_BASE_URL=http://llm-server:30000/v1
+      - OPENAI_API_KEY=None
+      - N_PARALLEL_TASKS=10
+      - HOST=0.0.0.0
+      - PORT=8000
+    depends_on:
+      - llm-server
+    volumes:
+      - ./logs:/app/logs  # Mount logs directory
+    restart: unless-stopped
+
+  # Optional: Include an LLM server using vLLM or similar
+  # Uncomment and configure as needed
+  # llm-server:
+  #   image: vllm/vllm-openai:latest
+  #   ports:
+  #     - "30000:8000"
+  #   command: >
+  #     --model Qwen/Qwen3-4B
+  #     --host 0.0.0.0
+  #     --port 8000
+  #     --served-model-name Qwen/Qwen3-4B
+  #   environment:
+  #     - CUDA_VISIBLE_DEVICES=0
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   restart: unless-stopped
+
+  # Placeholder LLM server for testing (remove in production)
+  llm-server:
+    image: python:3.10-slim
+    ports:
+      - "30000:30000"
+    command: >
+      sh -c "
+      pip install fastapi uvicorn &&
+      python -c \"
+      from fastapi import FastAPI;
+      app = FastAPI();
+      @app.post('/v1/chat/completions');
+      async def chat_completions(request: dict):
+          return {
+              'choices': [{'message': {'content': 'This is a mock response for testing'}}],
+              'usage': {'total_tokens': 10}
+          };
+      import uvicorn;
+      uvicorn.run(app, host='0.0.0.0', port=30000)
+      \"
+      "
+    restart: unless-stopped
+
+volumes:
+  logs: 
