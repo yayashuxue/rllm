@@ -1,7 +1,10 @@
 import asyncio
+import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -9,13 +12,14 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout_engine import RolloutEngine
+from rllm.db.episode_store import EpisodeStore, SQLiteEpisodeStore, NoOpEpisodeStore
 from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
 
 class AgentWorkflowEngine:
-    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks=128, retry_limit=3, **kwargs):
+    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks=128, retry_limit=3, episode_store: Optional[EpisodeStore] = None, default_db_path: Optional[str] = None, **kwargs):
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args
 
@@ -27,6 +31,23 @@ class AgentWorkflowEngine:
 
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
+
+        # Episode storage - automatically initialize SQLiteEpisodeStore if none provided
+        if episode_store is None:
+            if default_db_path is None:
+                # Create default database in current working directory
+                default_db_path = "episodes.db"
+            
+            # Ensure the directory exists
+            db_dir = Path(default_db_path).parent
+            db_dir.mkdir(parents=True, exist_ok=True)
+            
+            print(f"📁 Initializing episode store at: {default_db_path}")
+            self.episode_store = SQLiteEpisodeStore(default_db_path)
+            self._auto_created_store = True
+        else:
+            self.episode_store = episode_store
+            self._auto_created_store = False
 
         self.workflow_queue = None
 
@@ -40,13 +61,14 @@ class AgentWorkflowEngine:
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
             self.workflow_queue.put_nowait(workflow)
 
-    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, **kwargs) -> list[Episode]:
+    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, workflow_id: Optional[str] = None, **kwargs) -> list[Episode]:
         """
         Run asynchronous workflow with retry logic.
 
         Args:
             tasks: List of tasks to process
             task_ids: List of task ids (not unique if n_rollouts > 1)
+            workflow_id: Optional workflow identifier for grouping episodes in storage
         """
         if self.workflow_queue is None:
             await self.initialize_pool()
@@ -92,13 +114,19 @@ class AgentWorkflowEngine:
                 results[position] = result
                 pbar.update(1)
 
+        # Store episodes if workflow_id is provided
+        if workflow_id is not None:
+            for episode in results:
+                if episode is not None:  # Only store valid episodes
+                    self.episode_store.store_episode(episode, workflow_id)
+
         return results
 
-    async def execute_tasks_verl(self, batch: DataProto, **kwargs) -> DataProto:
+    async def execute_tasks_verl(self, batch: DataProto, workflow_id: Optional[str] = None, **kwargs) -> DataProto:
         self.rollout_engine.wake_up()
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
-        results = await self.execute_tasks(tasks, task_ids, **kwargs)  # list of Episodes
+        results = await self.execute_tasks(tasks, task_ids, workflow_id=workflow_id, **kwargs)  # list of Episodes
         self.rollout_engine.sleep()
         return self._transform_results_for_verl(results, task_ids)
 
@@ -259,3 +287,6 @@ class AgentWorkflowEngine:
         if hasattr(self, "executor") and self.executor is not None:
             self.executor.shutdown(wait=True)
             self.executor = None
+        
+        if hasattr(self, "episode_store") and self.episode_store is not None:
+            self.episode_store.close()
