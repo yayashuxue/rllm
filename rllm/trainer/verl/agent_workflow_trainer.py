@@ -403,20 +403,21 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             test_output_gen_batch.meta_info.pop("repeat_counts", None)  # no longer needed after this
             test_batch = test_batch.union(test_output_gen_batch)
 
-            # collect is_correct for each episode
-            id_to_correct = {}
-            for episode_id, is_correct in zip(test_batch.non_tensor_batch["episode_ids"], test_batch.non_tensor_batch["is_correct"], strict=False):
-                if episode_id not in id_to_correct:
-                    id_to_correct[episode_id] = is_correct
-            is_correct_lst.extend(id_to_correct.values())
+            seen_episodes = set()
+            selected_idxs = []
+            for i, episode_id in enumerate(test_batch.non_tensor_batch["episode_ids"]):
+                if episode_id not in seen_episodes:
+                    seen_episodes.add(episode_id)
+                    selected_idxs.append(i)
+            test_batch = test_batch.select_idxs(selected_idxs)
+
+            is_correct_lst.extend(test_batch.non_tensor_batch["is_correct"])
+            uid_lst.extend(test_batch.non_tensor_batch["task_ids"])
 
             data_sources = test_batch.non_tensor_batch.get("data_source", None)
             if data_sources is None:
-                data_sources = ["unknown"] * len(is_correct)
+                data_sources = ["unknown"] * len(test_batch)
             data_source_lst.extend(data_sources)
-
-            uids = test_batch.non_tensor_batch["task_ids"]
-            uid_lst.extend(uids)
 
         metrics = {}
         is_correct_array = np.array(is_correct_lst)
