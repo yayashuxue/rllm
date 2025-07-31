@@ -20,26 +20,22 @@ class MathAgent(BaseAgent):
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **kwargs):
         """Process environment feedback and update internal state."""
 
-        # Format observation based on whether it's the initial problem or subsequent feedback
-        if not self.trajectory.steps:
-            # Initial problem presentation
-            assert isinstance(observation, dict) and "question" in observation
+        # If observation is None, this is a reward update for the existing step
+        if observation is None:
+            if self.trajectory.steps:
+                cur_step = self.get_current_state()
+                cur_step.reward = reward
+                cur_step.done = done
+                cur_step.info = info
+            return
+
+        # This is a new observation, create a new step
+        if isinstance(observation, dict):
             formatted_observation = observation["question"]
         elif isinstance(observation, str):
             formatted_observation = observation
         else:
-            # Follow-up correction prompt
-            formatted_observation = "Your previous answer may contain a mistake. Please review it carefully and answer again. Put your final answer within \\boxed{}."
-
-        # Update reward on the latest step
-        if self.trajectory.steps:
-            cur_step = self.get_current_state()
-            cur_step.reward = reward
-            cur_step.done = done
-            cur_step.info = info
-
-        if done:
-            return
+            raise ValueError(f"Invalid observation type: {type(observation)}")
 
         self.messages.append({"role": "user", "content": formatted_observation})
 
@@ -71,8 +67,8 @@ class MathAgent(BaseAgent):
 
         return action
 
-    def reset(self):
-        """Reset agent state for new episode."""
+    def reset(self) -> None:
+        """Reset agent state for new episode (wipes trajectory and messages)."""
         self._trajectory = Trajectory()
         self.messages = []
 

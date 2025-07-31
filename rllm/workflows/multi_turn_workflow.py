@@ -34,16 +34,14 @@ class MultiTurnWorkflow(Workflow):
 
         self.agent.update_from_env(observation, 0, False, info)
 
-        for step in range(1, self.max_steps + 1):
+        for _ in range(1, self.max_steps + 1):
             response = await self.get_model_response(self.agent, **self.sampling_params)
             action = self.agent.update_from_model(response)
 
             next_obs, reward, done, info = await self.run_in_executor(self.env.step, action)
             self.agent.update_from_env(next_obs, reward, done, info)
 
-            if step >= self.max_steps:
-                raise TerminationEvent(TerminationReason.MAX_TURNS_EXCEEDED)
             if done:
                 raise TerminationEvent(TerminationReason.ENV_DONE)
 
-        raise TerminationEvent(TerminationReason.ENV_DONE)
+        raise TerminationEvent(TerminationReason.MAX_TURNS_EXCEEDED)

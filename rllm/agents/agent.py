@@ -44,7 +44,7 @@ class Episode:
     task: Any = None
     termination_reason = None
     is_correct: bool = False
-    trajectories: dict[str, Trajectory] = field(default_factory=dict)  # {agent_name: Trajectory, ...}
+    trajectories: list[tuple[str, Trajectory]] = field(default_factory=list)  # [(agent_name, Trajectory), ...]
 
     def to_dict(self):
         return {
@@ -52,7 +52,7 @@ class Episode:
             "task": self.task,
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
             "is_correct": bool(self.is_correct),
-            "trajectories": {k: v.to_dict() for k, v in self.trajectories.items()},
+            "trajectories": [(agent_name, trajectory.to_dict()) for agent_name, trajectory in self.trajectories],
         }
 
 

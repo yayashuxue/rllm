@@ -150,6 +150,10 @@ class RolloutEngine:
             The response from OpenAI API
         """
 
+        # TODO: introduce a nice way to handle args for different models/apis
+        if kwargs.get("model", "").startswith("o") and kwargs.get("max_tokens"):
+            del kwargs["max_tokens"]
+
         async def get_response(messages: list[dict]):
             retries = self.api_retries
             while retries > 0:
@@ -171,7 +175,7 @@ class RolloutEngine:
                     return f"Error processing content: {e}"
 
         response = await get_response(messages)
-        if isinstance(response, openai.types.ChatCompletion):
+        if isinstance(response, openai.types.chat.ChatCompletion):
             response = response.choices[0].message.content
         return response
 
