@@ -31,6 +31,7 @@ except ImportError:
         pass
 
 # Import BaseAgent from rLLM for wrapper classes
+from rllm.agents.agent import Step, Trajectory, Action
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +276,13 @@ You have been provided with these additional arguments, that you can access usin
                 chat_message = await asyncio.get_event_loop().run_in_executor(
                     None, lambda: self.model.generate(messages)
                 )
+            
+            # Record LLM call in trajectory for final answer (if agent has trajectory tracking)
+            if hasattr(self, '_record_llm_call'):
+                self._record_llm_call(messages, chat_message)
+                # Mark as done since this is the final answer
+                if hasattr(self, '_current_step') and self._current_step:
+                    self._current_step.done = True
             return chat_message
         except Exception as e:
             return ChatMessage(
@@ -550,10 +558,43 @@ class RLLMOpenAIModel(SmolModel):
 
 class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
     """
-    A wrapper over CodeAgent that uses async model calls.
+    A wrapper over CodeAgent that uses async model calls and implements rLLM trajectory interface.
     """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._rllm_trajectory = Trajectory()
+        self._current_step = None
+
+    def _create_new_step(self):
+        """Create a new Step object and append it to the trajectory."""
+        self._current_step = Step()
+        self._rllm_trajectory.steps.append(self._current_step)
+        return self._current_step
+
+    def _record_llm_call(self, input_messages, response):
+        """Record an LLM call in a new step."""
+        # Always create a new step for each LLM call
+        step = self._create_new_step()
+        
+        # Convert messages to OpenAI format
+        if hasattr(self.model, '_convert_smolagent_messages_to_openai'):
+            openai_messages = self.model._convert_smolagent_messages_to_openai(input_messages)
+        else:
+            # Fallback - assume already in correct format
+            openai_messages = input_messages if isinstance(input_messages, list) else [input_messages]
+        
+        # Add response
+        response_content = response.content if hasattr(response, 'content') else str(response)
+        openai_messages.append({"role": "assistant", "content": response_content})
+        
+        # Update the new step
+        step.chat_completions = openai_messages
+        step.model_response = response_content
+
+    @property
+    def trajectory(self) -> Trajectory:
+        """Return the rLLM trajectory object."""
+        return self._rllm_trajectory
 
     async def astep(self, memory_step=None, **kwargs):
         """
@@ -619,6 +660,9 @@ class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
                 memory_step.model_output_message = chat_message
                 output_text = chat_message.content if hasattr(chat_message, 'content') else str(chat_message)
                 
+                # Record LLM call in trajectory
+                self._record_llm_call(input_messages, chat_message)
+                
                 self.logger.log_markdown(
                     content=output_text,
                     title="Output message of the LLM:",
@@ -637,6 +681,9 @@ class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
                 )
                 memory_step.model_output_message = chat_message
                 output_text = chat_message.content
+                
+                # Record LLM call in trajectory
+                self._record_llm_call(input_messages, chat_message)
                 
                 self.logger.log_markdown(
                     content=output_text,
@@ -666,6 +713,9 @@ class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
                 code_action = parse_code_blobs(output_text, self.code_block_tags)
             code_action = fix_final_answer_code(code_action)
             memory_step.code_action = code_action
+            
+            # Record the code action in trajectory
+            self._current_step.action = code_action
         except Exception as e:
             error_msg = f"Error in code parsing:\n{e}\nMake sure to provide correct code blobs."
             raise AgentParsingError(error_msg, self.logger)
@@ -711,6 +761,9 @@ class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
         truncated_output = truncate_content(str(code_output.output))
         observation += "Last output from code snippet:\n" + truncated_output
         memory_step.observations = observation
+        
+        # Record the observation in trajectory
+        self._current_step.observation = observation
 
         if not code_output.is_final_answer:
             execution_outputs_console += [
@@ -718,6 +771,10 @@ class AsyncCodeAgent(AsyncAgentMixin, CodeAgent):
             ]
         self.logger.log(Group(*execution_outputs_console), level=LogLevel.INFO)
         memory_step.action_output = code_output.output
+        # Mark step as done if this is the final answer
+        if code_output.is_final_answer:
+            self._current_step.done = True
+            
         yield ActionOutput(output=code_output.output, is_final_answer=code_output.is_final_answer)
         
 
