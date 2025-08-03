@@ -118,6 +118,7 @@ class RolloutEngine:
                 try:
                     response = await self.client.completions.create(
                         prompt=prompt_text,
+                        model=kwargs.get("model", ""),
                         timeout=3600,
                         **kwargs,
                     )

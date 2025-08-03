@@ -1,6 +1,5 @@
 from collections.abc import AsyncGenerator, AsyncIterable
 from typing import Any, TypeVar
-import os
 
 from pydantic import BaseModel
 from strands import Agent
@@ -24,7 +23,6 @@ class RLLMModel(Model):
         Args:
             rollout_engine: The rLLM RolloutEngine instance to use for inference
             model_id: The model ID to use 
-            disable_telemetry: Whether to disable OpenTelemetry telemetry (default: True)
             **model_config: Additional model configuration
         """ 
         self.rollout_engine = rollout_engine
@@ -226,7 +224,6 @@ class StrandsAgent(Agent):
         
         Args:
             model: The model to use (can be a string or Model instance)
-            disable_telemetry: Whether to disable OpenTelemetry telemetry (default: True)
             **kwargs: Additional arguments to pass to the base Agent class
         """
             
@@ -378,71 +375,3 @@ class StrandsAgent(Agent):
             self._current_step.info.update(info)
         elif self._trajectory.steps:
             self._trajectory.steps[-1].info.update(info)
-
-
-def create_rllm_strands_agent(
-    rollout_engine: RolloutEngine,
-    model_id: str = "gpt-4",
-    system_prompt: str | None = None,
-    tools: list | None = None,
-    disable_telemetry: bool = True,
-    **kwargs
-) -> StrandsAgent:
-    """Create a StrandsAgent that uses rLLM's RolloutEngine for inference.
-    
-    This factory function creates a StrandsAgent with a RLLMModel backend,
-    combining the power of Strands' agent framework with rLLM's rollout capabilities.
-    
-    Args:
-        rollout_engine: The rLLM RolloutEngine instance to use for inference
-        model_id: The model ID to use (e.g., "gpt-4", "gpt-3.5-turbo")
-        system_prompt: Optional system prompt to set for the agent
-        tools: Optional list of tools to make available to the agent
-        disable_telemetry: Whether to disable OpenTelemetry telemetry (default: True)
-        **kwargs: Additional arguments to pass to the StrandsAgent constructor
-        
-    Returns:
-        A StrandsAgent instance configured with RLLMModel
-        
-    Example:
-        ```python
-        from rllm.engine.rollout_engine import RolloutEngine
-        from rllm.integrations.strands import create_rllm_strands_agent
-        
-        # Create rollout engine
-        rollout_engine = RolloutEngine(engine_name="openai", model="gpt-4")
-        
-        # Create agent (telemetry disabled by default)
-        agent = create_rllm_strands_agent(
-            rollout_engine=rollout_engine,
-            model_id="gpt-4",
-            system_prompt="You are a helpful assistant."
-        )
-        
-        # Or create agent with telemetry enabled
-        agent = create_rllm_strands_agent(
-            rollout_engine=rollout_engine,
-            model_id="gpt-4",
-            system_prompt="You are a helpful assistant.",
-            disable_telemetry=False
-        )
-        
-        # Use the agent
-        result = agent("Hello, how are you?")
-        
-        # Access trajectory information
-        trajectory = agent.trajectory
-        current_step = agent.get_current_state()
-        ```
-    """
-    # Create the RLLMModel
-    model = RLLMModel(rollout_engine=rollout_engine, model_id=model_id, disable_telemetry=disable_telemetry)
-    
-    # Create and return the StrandsAgent
-    return StrandsAgent(
-        model=model,
-        system_prompt=system_prompt,
-        tools=tools,
-        disable_telemetry=disable_telemetry,
-        **kwargs
-    )

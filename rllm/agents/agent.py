@@ -18,6 +18,9 @@ class Step:
     done: bool = False
     mc_return: float = 0.0
 
+    step_id: str = ""
+    step_num: int = 0
+
 
 @dataclass
 class Action:

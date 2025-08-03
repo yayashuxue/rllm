@@ -1,6 +1,3 @@
-import os
-
-os.environ["OTEL_SDK_DISABLED"] = "true"
 
 import asyncio
 
@@ -22,7 +19,6 @@ async def main():
             "api_key": "",
         },
     )
-    
     
     # Method 2: Manual creation (for more control)
     rollout_model = RLLMModel(

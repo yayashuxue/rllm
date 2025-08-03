@@ -13,6 +13,14 @@ from rllm.engine.rollout_engine import RolloutEngine
 from rllm.environments.base.base_env import BaseEnv
 
 
+class NoOpBarrier:
+    """A no-op barrier for single workflow usage that doesn't perform synchronization."""
+
+    def mark_terminated(self, uid: str) -> None:
+        """Mark a workflow as terminated. This is a no-op for single workflow usage."""
+        pass
+
+
 def handle_termination(func: Callable):
     """Decorator that handles termination errors and breaks the loop"""
 
@@ -46,10 +54,19 @@ class TerminationEvent(Exception):
 
 
 class Workflow(ABC):
-    def __init__(self, rollout_engine: RolloutEngine, executor: ThreadPoolExecutor, barrier, max_prompt_length=4096, max_response_length=8192, accumulate_response_length=True, timeout=None, gamma=0.0, reward_bonus_coeff=0.0, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, executor: ThreadPoolExecutor | None = None, barrier=None, max_prompt_length=4096, max_response_length=8192, accumulate_response_length=True, timeout=None, gamma=0.0, reward_bonus_coeff=0.0, **kwargs):
         self.rollout_engine = rollout_engine
+
+        # Provide default executor if None
+        if executor is None:
+            executor = ThreadPoolExecutor(max_workers=4)
         self.executor = executor
+
+        # Provide default barrier if None
+        if barrier is None:
+            barrier = NoOpBarrier()
         self.barrier = barrier
+
         self.max_prompt_length = max_prompt_length
         self.max_response_length = max_response_length
         self.accumulate_response_length = accumulate_response_length
