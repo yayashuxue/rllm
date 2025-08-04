@@ -64,4 +64,7 @@ class CritiqueWorkflow(Workflow):
         raise TerminationEvent(TerminationReason.ENV_DONE)
 
     def assign_episode_correctness(self, episode: Episode) -> None:
-        episode.is_correct = episode.trajectories["solver"].reward > 0
+        for agent_name, trajectory in episode.trajectories:
+            if agent_name == "solver":
+                episode.is_correct = trajectory.reward > 0
+                return
