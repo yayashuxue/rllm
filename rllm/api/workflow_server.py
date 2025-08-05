@@ -176,7 +176,7 @@ def serve_workflow(
         engine = AgentWorkflowEngine(...)
         
         # Serve it
-        serve_workflow(engine, "critique", port=8001)
+        serve_workflow(engine, "math", port=8001)
         ```
     """
     # Use environment variables or defaults

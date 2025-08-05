@@ -4,7 +4,7 @@ A FastAPI-based web service that serves agentic workflows from the rLLM framewor
 
 ## Features
 
-- **Multiple Workflow Types**: Support for critique, single-turn, and multi-turn workflows
+- **Multiple Workflow Types**: Support for single-turn and multi-turn workflows
 - **Synchronous & Asynchronous Execution**: Execute tasks immediately or submit for background processing
 - **Batch Processing**: Execute multiple tasks simultaneously
 - **Live Status Tracking**: Monitor task progress and collect results
@@ -75,9 +75,8 @@ curl -X GET "http://localhost:8000/workflows"
 Response:
 ```json
 {
-  "workflows": ["critique", "single_turn", "multi_turn"],
+  "workflows": ["single_turn", "multi_turn"],
   "description": {
-    "critique": "Multi-agent workflow with solver and critic",
     "single_turn": "Single-turn agent-environment interaction",
     "multi_turn": "Multi-turn agent-environment interaction"
   }
@@ -96,7 +95,7 @@ curl -X POST "http://localhost:8000/execute" \
       "idx": 0,
       "data_source": "math"
     },
-    "workflow_type": "critique"
+    "workflow_type": "single_turn"
   }'
 ```
 
@@ -160,7 +159,7 @@ import json
 # API base URL
 BASE_URL = "http://localhost:8000"
 
-def execute_task(task, workflow_type="critique"):
+def execute_task(task, workflow_type="single_turn"):
     """Execute a single task synchronously"""
     response = requests.post(
         f"{BASE_URL}/execute",
@@ -171,7 +170,7 @@ def execute_task(task, workflow_type="critique"):
     )
     return response.json()
 
-def submit_task_async(task, workflow_type="critique"):
+def submit_task_async(task, workflow_type="single_turn"):
     """Submit task for asynchronous execution"""
     response = requests.post(
         f"{BASE_URL}/submit",
@@ -201,11 +200,11 @@ task = {
 }
 
 # Synchronous execution
-result = execute_task(task, "critique")
+result = execute_task(task, "single_turn")
 print("Synchronous result:", result["episode"]["is_correct"])
 
 # Asynchronous execution
-task_id = submit_task_async(task, "single_turn")
+task_id = submit_task_async(task, "multi_turn")
 print(f"Submitted task: {task_id}")
 
 # Poll for completion
@@ -230,7 +229,7 @@ while True:
 ```python
 import requests
 
-def execute_batch(tasks, workflow_type="critique"):
+def execute_batch(tasks, workflow_type="single_turn"):
     """Execute multiple tasks in batch"""
     response = requests.post(
         f"{BASE_URL}/execute_batch",
@@ -253,7 +252,7 @@ tasks = [
 ]
 
 # Execute batch
-results = execute_batch(tasks, "single_turn")
+results = execute_batch(tasks, "multi_turn")
 
 # Process results
 for i, episode in enumerate(results["episodes"]):
@@ -306,9 +305,8 @@ Each executed task returns an `Episode` object with the following structure:
 
 ### Workflow Types
 
-1. **critique**: Multi-agent workflow with a solver and critic agent
-2. **single_turn**: Single interaction between agent and environment
-3. **multi_turn**: Multiple turns of agent-environment interaction (up to 5 steps)
+1. **single_turn**: Single interaction between agent and environment
+2. **multi_turn**: Multiple turns of agent-environment interaction (up to 5 steps)
 
 ### Environment Variables
 

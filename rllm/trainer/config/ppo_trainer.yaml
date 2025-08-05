@@ -265,7 +265,6 @@ algorithm:
     mask_max_turns_exceeded: True
     mask_timeout: True
     mask_env_done: False
-    mask_not_enough_peers: False
   rejection_sample:
     enable: False
     multiplier: 3

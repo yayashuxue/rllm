@@ -7,13 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
-from ..agents.critique_agent import CritiqueAgent
 from ..agents.math_agent import MathAgent
 from ..engine.agent_workflow_engine import AgentWorkflowEngine
 from ..engine.rollout_engine import RolloutEngine
-from ..environments.base.critique_env import CritiqueEnvironment
+from ..environments.base.single_turn_env import SingleTurnEnvironment
 from ..rewards.reward_fn import math_reward_fn
-from ..workflows.critique_workflow import CritiqueWorkflow
 from ..workflows.multi_turn_workflow import MultiTurnWorkflow
 from ..workflows.single_turn_workflow import SingleTurnWorkflow
 
@@ -21,12 +19,12 @@ from ..workflows.single_turn_workflow import SingleTurnWorkflow
 # Pydantic models for API
 class TaskRequest(BaseModel):
     task: dict[str, Any]
-    workflow_type: str = "critique"  # critique, single_turn, multi_turn
+    workflow_type: str = "single_turn"  # single_turn, multi_turn
     workflow_config: dict[str, Any] | None = None
 
 class TaskBatchRequest(BaseModel):
     tasks: list[dict[str, Any]]
-    workflow_type: str = "critique"
+    workflow_type: str = "single_turn"
     workflow_config: dict[str, Any] | None = None
 
 class TaskResponse(BaseModel):
@@ -79,32 +77,12 @@ class WorkflowEngine:
             "model": model_name
         }
         
-        # Critique workflow engine
-        self.engines["critique"] = AgentWorkflowEngine(
-            workflow_cls=CritiqueWorkflow,
-            workflow_args={
-                "solver_cls": MathAgent,
-                "critic_cls": CritiqueAgent,
-                "env_cls": CritiqueEnvironment,
-                "solver_args": {"accumulate_thinking": False},
-                "critic_args": {"accumulate_thinking": False},
-                "env_args": {"reward_fn": math_reward_fn},
-                "max_prompt_length": 16384,
-                "max_response_length": 16384,
-                "sampling_params": default_sampling_params,
-            },
-            rollout_engine=rollout_engine,
-            config=None,
-            n_parallel_tasks=n_parallel_tasks,
-            retry_limit=1,
-        )
-        
         # Single turn workflow engine
         self.engines["single_turn"] = AgentWorkflowEngine(
             workflow_cls=SingleTurnWorkflow,
             workflow_args={
                 "agent_cls": MathAgent,
-                "env_cls": CritiqueEnvironment,
+                "env_cls": SingleTurnEnvironment,
                 "agent_args": {"accumulate_thinking": False},
                 "env_args": {"reward_fn": math_reward_fn},
                 "max_prompt_length": 16384,
@@ -122,7 +100,7 @@ class WorkflowEngine:
             workflow_cls=MultiTurnWorkflow,
             workflow_args={
                 "agent_cls": MathAgent,
-                "env_cls": CritiqueEnvironment,
+                "env_cls": SingleTurnEnvironment,
                 "agent_args": {"accumulate_thinking": False},
                 "env_args": {"reward_fn": math_reward_fn},
                 "max_steps": 5,
@@ -180,7 +158,6 @@ async def list_workflows():
     return {
         "workflows": list(workflow_engine.engines.keys()),
         "description": {
-            "critique": "Multi-agent workflow with solver and critic",
             "single_turn": "Single-turn agent-environment interaction",
             "multi_turn": "Multi-turn agent-environment interaction"
         }

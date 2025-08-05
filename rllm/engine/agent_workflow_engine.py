@@ -13,7 +13,6 @@ from tqdm import tqdm
 
 from rllm.agents.agent import Episode
 from rllm.engine.rollout_engine import RolloutEngine
-from rllm.engine.workflow_barrier import WorkflowBarrier
 from rllm.db.episode_store import EpisodeStore, SQLiteEpisodeStore, NoOpEpisodeStore
 from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
@@ -58,9 +57,8 @@ class AgentWorkflowEngine:
         if self.workflow_queue is not None:
             return
         self.workflow_queue = asyncio.Queue(maxsize=self.n_parallel_tasks)
-        self.barrier = WorkflowBarrier([], min_peers=self.workflow_args.pop("min_peers", 1), max_peers=self.workflow_args.pop("max_peers", None))
         for i in range(self.n_parallel_tasks):
-            workflow = self.workflow_cls(rollout_engine=self.rollout_engine, executor=self.executor, barrier=self.barrier, rng=random.Random(i), **self.workflow_args)
+            workflow = self.workflow_cls(rollout_engine=self.rollout_engine, executor=self.executor, **self.workflow_args)
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
             self.workflow_queue.put_nowait(workflow)
 
@@ -83,18 +81,13 @@ class AgentWorkflowEngine:
                 episode_id = f"{task_id}_{counters[task_id]}"
                 episode_ids.append(episode_id)
                 counters[task_id] += 1
-            self.barrier.reset(episode_ids)
         else:
             episode_ids = [str(uuid.uuid4()) for _ in tasks]
-            # Reset barrier to empty state so that any use will raise an error;
-            # this prevents stale task_id_to_uids from persisting across calls.
-            self.barrier.reset([])
 
         async def process_task_with_retry(task: dict, uid: str) -> Episode:
             """Process a single task with retry logic"""
             workflow = await self.workflow_queue.get()
             try:
-                workflow.barrier = self.barrier
                 for retry_attempt in range(1, self.retry_limit + 1):
                     try:
                         episode = await workflow(task=task, uid=uid, **kwargs)
@@ -255,7 +248,7 @@ class AgentWorkflowEngine:
         if cf.enable:
             for i in range(len(episode_ids)):
                 termination_reason = termination_reasons[i]
-                if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE) or (cf.mask_not_enough_peers and termination_reason == TerminationReason.NOT_ENOUGH_PEERS):
+                if (cf.mask_max_prompt_length_exceeded and termination_reason == TerminationReason.MAX_PROMPT_LENGTH_EXCEEDED) or (cf.mask_max_response_length_exceeded and termination_reason == TerminationReason.MAX_RESPONSE_LENGTH_EXCEEDED) or (cf.mask_max_turns_exceeded and termination_reason == TerminationReason.MAX_TURNS_EXCEEDED) or (cf.mask_timeout and termination_reason == TerminationReason.TIMEOUT) or (cf.mask_env_done and termination_reason == TerminationReason.ENV_DONE):
                     # set flag to filter out the episode later
                     is_valid[i] = False
 

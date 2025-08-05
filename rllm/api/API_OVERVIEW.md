@@ -105,9 +105,8 @@ export PORT="8000"
 
 ## 📡 Available Workflows
 
-1. **`critique`**: Multi-agent solver + critic workflow
-2. **`single_turn`**: Single agent-environment interaction
-3. **`multi_turn`**: Multi-step agent interactions (up to 5 steps)
+1. **`single_turn`**: Single agent-environment interaction
+2. **`multi_turn`**: Multi-step agent interactions (up to 5 steps)
 
 ## 🔗 Key Endpoints
 

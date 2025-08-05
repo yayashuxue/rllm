@@ -25,7 +25,7 @@ def test_single_task():
         f"{BASE_URL}/execute",
         json={
             "task": task,
-            "workflow_type": "critique"
+            "workflow_type": "single_turn"
         }
     )
     

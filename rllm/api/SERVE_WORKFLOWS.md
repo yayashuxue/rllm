@@ -85,7 +85,7 @@ Serve a workflow via HTTP.
 
 **Example:**
 ```python
-serve(engine, "critique", port=8001, reload=True)
+serve(engine, "math", port=8001, reload=True)
 ```
 
 ## 🌐 **HTTP Endpoints**
@@ -169,17 +169,17 @@ Interactive Swagger UI documentation.
 
 ## 🛠️ **Examples**
 
-### **Critique Workflow**
+### **Math Workflow**
 
 ```bash
 # Run evaluation
-python examples/workflow/critique/run_critique_workflow.py eval
+python examples/workflow/math/run_math_workflow.py eval
 
 # Serve via HTTP
-python examples/workflow/critique/run_critique_workflow.py serve --port 8001
+python examples/workflow/math/run_math_workflow.py serve --port 8001
 
 # Test the server
-python examples/workflow/critique/test_critique_server.py
+python examples/workflow/math/test_math_server.py
 ```
 
 ### **Creating Your Own Servable Workflow**
@@ -322,13 +322,13 @@ curl -X POST http://localhost:8001/execute \
 
 ```python
 # Terminal 1
-serve(critique_engine, "critique", port=8001)
+serve(math_engine, "math", port=8001)
 
 # Terminal 2  
-serve(math_engine, "math", port=8002)
+serve(code_engine, "code", port=8002)
 
 # Terminal 3
-serve(code_engine, "code", port=8003)
+serve(custom_engine, "custom", port=8003)
 ```
 
 ### **Custom Endpoints**
@@ -368,7 +368,6 @@ server.serve(port=8001)
 
 Check out the examples directory for more servable workflow scripts:
 
-- `examples/workflow/critique/run_critique_workflow.py` - Critique workflow with solver and critic
 - `examples/workflow/math/run_math_workflow.py` - Math problem solving
 - `examples/workflow/code/run_code_workflow.py` - Code generation and execution
 
