@@ -40,7 +40,6 @@ class AsyncAgentMixin:
     """
     Mixin class providing common async run functionality for AsyncCodeAgent and AsyncToolCallingAgent.
     """
-    
     async def arun(
         self,
         task: str,
@@ -366,14 +365,14 @@ class RLLMOpenAIModel(SmolModel):
             
             response = await self.rollout_engine.get_model_response(
                 prompt,
-                model=sampling_params.pop("model", ""),
+                # model=sampling_params.pop("model", ""),
                 application_id=self.application_id,
                 max_tokens=sampling_params.pop("max_tokens", 4096),
                 **sampling_params,
                 **kwargs
             )
 
-            print("Response: ", response)
+            # print("Response: ", response)
             
             # Create a ChatMessage-like response object
             if SMOLAGENTS_AVAILABLE:
