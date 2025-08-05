@@ -149,6 +149,7 @@ class Router:
             kwargs["n"] = 1
 
         kwargs.update(sampling_params)
+        kwargs.pop("model", None)
 
         address = await self.get_address(application_id)
 
