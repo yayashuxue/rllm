@@ -27,7 +27,7 @@ class RLLMClient:
         response.raise_for_status()
         return response.json()
     
-    def execute_task_sync(self, task: Dict[str, Any], workflow_type: str = "critique") -> dict:
+    def execute_task_sync(self, task: Dict[str, Any], workflow_type: str = "single_turn") -> dict:
         """Execute a single task synchronously"""
         response = requests.post(
             f"{self.base_url}/execute",
@@ -39,7 +39,7 @@ class RLLMClient:
         response.raise_for_status()
         return response.json()
     
-    def execute_batch_sync(self, tasks: List[Dict[str, Any]], workflow_type: str = "critique") -> dict:
+    def execute_batch_sync(self, tasks: List[Dict[str, Any]], workflow_type: str = "single_turn") -> dict:
         """Execute multiple tasks in batch synchronously"""
         response = requests.post(
             f"{self.base_url}/execute_batch",
@@ -51,7 +51,7 @@ class RLLMClient:
         response.raise_for_status()
         return response.json()
     
-    def submit_task_async(self, task: Dict[str, Any], workflow_type: str = "critique") -> str:
+    def submit_task_async(self, task: Dict[str, Any], workflow_type: str = "single_turn") -> str:
         """Submit task for asynchronous execution"""
         response = requests.post(
             f"{self.base_url}/submit",
@@ -124,8 +124,8 @@ def demo_synchronous_execution(client: RLLMClient):
     
     print(f"Executing task: {task['question']}")
     
-    # Execute with critique workflow
-    result = client.execute_task_sync(task, "critique")
+    # Execute with single_turn workflow
+    result = client.execute_task_sync(task, "single_turn")
     
     print(f"Task ID: {result['task_id']}")
     print(f"Status: {result['status']}")
@@ -199,7 +199,7 @@ def demo_workflow_comparison(client: RLLMClient):
     
     task = create_math_task("What is the square root of 144?", "12")
     
-    workflows = ["single_turn", "multi_turn", "critique"]
+    workflows = ["single_turn", "multi_turn"]
     
     print(f"Testing task with different workflows: {task['question']}")
     

@@ -201,7 +201,7 @@ Use descriptive, unique workflow IDs:
 
 ```python
 # Good examples
-workflow_id = "math_critique_baseline_v1"
+workflow_id = "math_single_turn_baseline_v1"
 workflow_id = "code_generation_experiment_2024_01_15"
 workflow_id = f"hyperparameter_sweep_temp_{temperature}_top_p_{top_p}"
 
@@ -244,8 +244,8 @@ store = SQLiteEpisodeStore("logs/episode_store.db")
 
 See the example scripts for complete usage:
 
-- `examples/workflow/critique/run_critique_workflow_with_storage.py` - Shows how to use episode storage
-- `examples/workflow/critique/query_episode_store.py` - Demonstrates querying stored episodes
+- `examples/workflow/math/run_math_workflow_with_storage.py` - Shows how to use episode storage
+- `examples/workflow/math/query_episode_store.py` - Demonstrates querying stored episodes
 
 ## Limitations
 
