@@ -1,27 +1,24 @@
 import asyncio
 import random
-import os
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from rllm.agents.agent import Episode
+from rllm.db.episode_store import EpisodeStore
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.engine.workflow_barrier import WorkflowBarrier
-from rllm.db.episode_store import EpisodeStore, SQLiteEpisodeStore, NoOpEpisodeStore
 from rllm.workflows.workflow import TerminationReason, Workflow
 from verl import DataProto
 from verl.utils.torch_functional import pad_sequence_to_length
 
 
 class AgentWorkflowEngine:
-    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks=128, retry_limit=3, episode_store: Optional[EpisodeStore] = None, default_db_path: Optional[str] = None, **kwargs):
+    def __init__(self, workflow_cls: type[Workflow], workflow_args: dict, rollout_engine: RolloutEngine, config=None, n_parallel_tasks=128, retry_limit=3, episode_store: EpisodeStore | None = None, default_db_path: str | None = None, **kwargs):
         self.workflow_cls = workflow_cls
         self.workflow_args = workflow_args
 
@@ -34,20 +31,7 @@ class AgentWorkflowEngine:
         self.n_parallel_tasks = n_parallel_tasks
         self.executor = ThreadPoolExecutor(max_workers=self.n_parallel_tasks)
 
-        # Episode storage - automatically initialize SQLiteEpisodeStore if none provided
-        if episode_store is None:
-            if default_db_path is None:
-                # Create default database in current working directory
-                default_db_path = "episodes.db"
-            
-            # Ensure the directory exists
-            db_dir = Path(default_db_path).parent
-            db_dir.mkdir(parents=True, exist_ok=True)
-            
-            print(f"📁 Initializing episode store at: {default_db_path}")
-            self.episode_store = SQLiteEpisodeStore(default_db_path)
-            self._auto_created_store = True
-        else:
+        if episode_store is not None:
             self.episode_store = episode_store
             self._auto_created_store = False
 
@@ -64,7 +48,7 @@ class AgentWorkflowEngine:
             assert workflow.is_multithread_safe(), "Workflows must contain only thread-save environments"
             self.workflow_queue.put_nowait(workflow)
 
-    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, workflow_id: Optional[str] = None, **kwargs) -> list[Episode]:
+    async def execute_tasks(self, tasks: list[dict], task_ids: list[str] | None = None, workflow_id: str | None = None, **kwargs) -> list[Episode]:
         """
         Run asynchronous workflow with retry logic.
 
@@ -119,15 +103,14 @@ class AgentWorkflowEngine:
                 results[position] = result
                 pbar.update(1)
 
-        # Store episodes if workflow_id is provided
-        if workflow_id is not None:
+        if workflow_id is not None and self.episode_store is not None:
             for episode in results:
                 if episode is not None:  # Only store valid episodes
                     self.episode_store.store_episode(episode, workflow_id)
 
         return results
 
-    async def execute_tasks_verl(self, batch: DataProto, workflow_id: Optional[str] = None, **kwargs) -> DataProto:
+    async def execute_tasks_verl(self, batch: DataProto, workflow_id: str | None = None, **kwargs) -> DataProto:
         self.rollout_engine.wake_up()
         tasks = batch.non_tensor_batch["extra_info"].tolist()
         task_ids = batch.non_tensor_batch["task_ids"].tolist()
@@ -208,7 +191,7 @@ class AgentWorkflowEngine:
 
             episode_ids.extend([episode.id] * total_steps)
             is_correct.extend([episode.is_correct] * total_steps)
-            termination_reasons.extend([episode.termination_reason] * total_steps)
+            termination_reasons.extend([episode.termination_reason if episode.termination_reason is not None else TerminationReason.ENV_DONE] * total_steps)
             repeat_counts.append(total_steps)
 
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
