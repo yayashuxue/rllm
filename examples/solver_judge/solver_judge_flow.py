@@ -12,12 +12,14 @@ class Solver:
         self.rollout_engine = rollout_engine
 
     
-    async def generate_multiple_solutions(self, problem: str, n_solutions: int = 4) -> list[str]:
+    async def generate_multiple_solutions(self, problem: str, n_solutions: int = 2) -> list[str]:
         """Generate multiple solutions to the problem and log each as a step."""
         responses = []
         solutions = []
         
-        for i in range(n_solutions):
+        import asyncio
+        
+        async def generate_solution(i):
             messages = [{"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}]
 
             response = await self.rollout_engine.get_model_response(messages)
@@ -27,16 +29,13 @@ class Solver:
             else:
                 action = response
             
-            # # Create step for this solution attempt
-            # solution_step = Step(
-            #     model_response=response,
-            #     action=Action(action),
-            #     chat_completions=messages + [{"role": "assistant", "content": response}],
-            #     info={"solution_index": i+1, "total_solutions": n_solutions},
-            #     step_id = f"solution_{i+1}"
-            # )
-            # self._trajectory.steps.append(solution_step)
-
+            return response, action
+        
+        tasks = [generate_solution(i) for i in range(n_solutions)]
+        results = await asyncio.gather(*tasks)
+        
+        # Extract responses and solutions from results
+        for response, action in results:
             responses.append(response)
             solutions.append(action)
 
@@ -192,8 +191,6 @@ class SolverJudgeWorkflow(Workflow):
                 model_response=responses[i],
                 action=Action(solutions[i]),
                 chat_completions=[user_message, {"role": "assistant", "content": responses[i]}],
-                info={"solution_index": i+1, "total_solutions": self.n_solutions},
-                step_id = f"solution_{i+1}",
                 reward = reward_result.reward,
             ))
         
@@ -224,6 +221,7 @@ class SolverJudgeWorkflow(Workflow):
             task=task,
             is_correct=is_correct,
             trajectories=[("solver", traj) for i, traj in enumerate(solver_trajecories)] + [("judge", self.judge.trajectory)]
+            # trajectories=[("solver", traj) for traj in solver_trajecories]
             # all solver trajectories will get grouped together in GRPO
         )
         

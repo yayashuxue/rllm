@@ -176,9 +176,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         if not candidate_is_correct.any():  # also catches case where not candidate_rows.any() i.e., all rows are invalid
                             drop_uids.add(uid)
                             solve_none += 1
-                        elif candidate_is_correct.all():
-                            drop_uids.add(uid)
-                            solve_all += 1
+                        # elif candidate_is_correct.all():
+                        #     drop_uids.add(uid)
+                        #     solve_all += 1
                         else:
                             solve_partial += 1
 
@@ -379,6 +379,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         is_correct_lst = []
         data_source_lst = []
         uid_lst = []
+        trajectory_ids_lst = []
+        traj_rewards_lst = []
+        
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             test_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
@@ -403,26 +406,44 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             test_output_gen_batch.meta_info.pop("repeat_counts", None)  # no longer needed after this
             test_batch = test_batch.union(test_output_gen_batch)
 
-            seen_episodes = set()
-            selected_idxs = []
-            for i, episode_id in enumerate(test_batch.non_tensor_batch["episode_ids"]):
-                if episode_id not in seen_episodes:
-                    seen_episodes.add(episode_id)
-                    selected_idxs.append(i)
-            test_batch = test_batch.select_idxs(selected_idxs)
-
             is_correct_lst.extend(test_batch.non_tensor_batch["is_correct"])
             uid_lst.extend(test_batch.non_tensor_batch["task_ids"])
+            trajectory_ids_lst.extend(test_batch.non_tensor_batch["trajectory_ids"])
+            
+            # Extract trajectory rewards - use step_rewards for stepwise advantage or traj_rewards otherwise
+            if self.config.algorithm.stepwise_advantage.enable:
+                # For stepwise advantage, we want the step rewards
+                reward_tensor = test_batch.batch["step_rewards"]
+            else:
+                # For non-stepwise, use trajectory-level rewards
+                reward_tensor = test_batch.batch["traj_rewards"]
+            
+            # Extract the actual reward values from the tensor (rewards are placed at last valid token position)
+            attention_mask = test_batch.batch["attention_mask"]
+            max_prompt_length = self.config.data.max_prompt_length
+            response_attention_mask = attention_mask[:, max_prompt_length:]
+            
+            for i in range(reward_tensor.shape[0]):
+                # Find the last valid token position in the response
+                valid_positions = torch.where(response_attention_mask[i] == 1)[0]
+                if len(valid_positions) > 0:
+                    last_valid_idx = valid_positions[-1].item()
+                    reward_value = reward_tensor[i, last_valid_idx].item()
+                else:
+                    reward_value = 0.0
+                traj_rewards_lst.append(reward_value)
 
             data_sources = test_batch.non_tensor_batch.get("data_source", None)
             if data_sources is None:
-                data_sources = ["unknown"] * len(test_batch)
+                data_sources = ["data"] * len(test_batch)
             data_source_lst.extend(data_sources)
 
         metrics = {}
         is_correct_array = np.array(is_correct_lst)
         uid_array = np.array(uid_lst)
         data_source_array = np.array(data_source_lst)
+        trajectory_ids_array = np.array(trajectory_ids_lst)
+        traj_rewards_array = np.array(traj_rewards_lst)
 
         for data_source in np.unique(data_source_array):
             pass_rates = defaultdict(list)
@@ -430,12 +451,28 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
             data_source_mask = data_source_array == data_source
             is_correct_data_source = is_correct_array[data_source_mask]
             uids_data_source = uid_array[data_source_mask]
+            trajectory_ids_data_source = trajectory_ids_array[data_source_mask]
+            traj_rewards_data_source = traj_rewards_array[data_source_mask]
 
             for is_correct, uid in zip(is_correct_data_source, uids_data_source, strict=False):
                 pass_rates[uid].append(is_correct)
 
             metrics[f"val/{data_source}/pass@1"] = np.mean(is_correct_data_source)
             metrics[f"val/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
+            
+            # Compute trajectory-level reward metrics
+            trajectory_rewards_by_name = defaultdict(list)
+            for trajectory_id, reward in zip(trajectory_ids_data_source, traj_rewards_data_source, strict=False):
+                # Extract trajectory name from trajectory_id (format: task_id_trajectory_name)
+                # trajectory_id format: "1234567890_solver" or "1234567890_judge"
+                trajectory_name = trajectory_id.split('_')[-1]  # Get the last part after the last underscore
+                
+                # Reward is already a scalar value from our extraction above
+                trajectory_rewards_by_name[trajectory_name].append(float(reward))
+            
+            # Log mean rewards for each trajectory type
+            for trajectory_name, rewards in trajectory_rewards_by_name.items():
+                metrics[f"val/{data_source}/{trajectory_name}_mean_reward"] = np.mean(rewards)
 
         return metrics
 
