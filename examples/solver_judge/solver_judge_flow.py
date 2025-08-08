@@ -14,6 +14,7 @@ class Solver:
     
     async def generate_multiple_solutions(self, problem: str, n_solutions: int = 4) -> list[str]:
         """Generate multiple solutions to the problem and log each as a step."""
+        responses = []
         solutions = []
         
         for i in range(n_solutions):
@@ -26,20 +27,20 @@ class Solver:
             else:
                 action = response
             
-            
-            # Create step for this solution attempt
-            solution_step = Step(
-                model_response=response,
-                action=Action(action),
-                chat_completions=messages + [{"role": "assistant", "content": response}],
-                info={"solution_index": i+1, "total_solutions": n_solutions},
-                step_id = f"solution_{i+1}"
-            )
-            self._trajectory.steps.append(solution_step)
-            
+            # # Create step for this solution attempt
+            # solution_step = Step(
+            #     model_response=response,
+            #     action=Action(action),
+            #     chat_completions=messages + [{"role": "assistant", "content": response}],
+            #     info={"solution_index": i+1, "total_solutions": n_solutions},
+            #     step_id = f"solution_{i+1}"
+            # )
+            # self._trajectory.steps.append(solution_step)
+
+            responses.append(response)
             solutions.append(action)
-        
-        return solutions
+
+        return responses, solutions
     
     def reset(self):
         """Reset the solver's trajectory."""
@@ -160,7 +161,7 @@ Reasoning: [Your detailed reasoning for why this solution is best]
 
 
 class SolverJudgeWorkflow(Workflow):
-    def __init__(self, rollout_engine: RolloutEngine, n_solutions: int = 4, reward_function: RewardFunction = None, **kwargs):
+    def __init__(self, rollout_engine: RolloutEngine, n_solutions: int = 2, reward_function: RewardFunction = None, **kwargs):
         super().__init__(rollout_engine, **kwargs)
         
         self.n_solutions = n_solutions
@@ -175,10 +176,26 @@ class SolverJudgeWorkflow(Workflow):
         
         problem = task["question"]  # Changed from "query" to "question" for countdown format
 
+        solver_trajecories = [Trajectory() for _ in range(self.n_solutions)]
+
         # Step 1: Solver generates multiple solutions
-        solutions = await self.solver.generate_multiple_solutions(
+        responses, solutions= await self.solver.generate_multiple_solutions(
             problem, self.n_solutions
         )
+
+        user_message = {"role": "user", "content": f"{problem}. Output the final answer within <answer>...</answer>"}
+
+        for i in range(self.n_solutions):
+            reward_result = self.reward_function(task, solutions[i])
+            
+            solver_trajecories[i].steps.append(Step(
+                model_response=responses[i],
+                action=Action(solutions[i]),
+                chat_completions=[user_message, {"role": "assistant", "content": responses[i]}],
+                info={"solution_index": i+1, "total_solutions": self.n_solutions},
+                step_id = f"solution_{i+1}",
+                reward = reward_result.reward,
+            ))
         
         # Step 2: Judge selects the best solution
         verification_result = await self.judge.select_best_solution(
@@ -206,10 +223,8 @@ class SolverJudgeWorkflow(Workflow):
             id=uid,
             task=task,
             is_correct=is_correct,
-            trajectories=[
-                ("solver", self.solver.trajectory),
-                ("judge", self.judge.trajectory)
-            ]
+            trajectories=[("solver", traj) for i, traj in enumerate(solver_trajecories)] + [("judge", self.judge.trajectory)]
+            # all solver trajectories will get grouped together in GRPO
         )
         
         return episode

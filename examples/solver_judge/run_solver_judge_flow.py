@@ -12,7 +12,7 @@ from transformers import AutoTokenizer
 from rllm.data.dataset import DatasetRegistry
 from rllm.engine.agent_workflow_engine import AgentWorkflowEngine
 from rllm.engine.rollout_engine import RolloutEngine
-from rllm.rewards.reward_fn import RewardOutput
+from rllm.rewards.countdown_reward import countdown_reward_fn
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'countdown'))
 
@@ -54,31 +54,6 @@ def process_countdown_fn(example, idx):
         "nums": nums
     }
     return task
-
-
-def countdown_reward_fn(action_str, task, **kwargs) -> RewardOutput:
-    """Wrapper to adapt countdown_reward_fn to the expected interface."""
-    from countdown_reward import compute_score
-    
-    ground_truth = task["ground_truth"]
-    score = compute_score(action_str, ground_truth)
-
-    return RewardOutput(reward=score, is_correct=score >= 1.0, metadata={
-        "target": ground_truth["target"],
-        "numbers": ground_truth["numbers"],
-        "extracted_answer": action_str
-    })
-    
-    # return {
-    #     "reward": score,
-    #     "is_correct": score >= 1.0,
-    #     "info": {
-    #         "target": ground_truth["target"],
-    #         "numbers": ground_truth["numbers"],
-    #         "extracted_answer": action_str
-    #     }
-    # }
-
 
 def evaluate_results(results):
     """Evaluate the results and compute pass@k metrics."""
