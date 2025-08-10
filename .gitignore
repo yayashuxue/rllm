@@ -192,3 +192,6 @@ rllm/data/train/
 
 rllm/data/datasets/
 rllm/registry/
+
+*.db
+pdfs/

@@ -127,6 +127,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         solve_partial = 0
         num_tasks = 0
         termination_counts = Counter()
+        workflow_metrics = defaultdict(list)
         metrics = {}
         timing_raw = {}
 
@@ -182,8 +183,22 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                         else:
                             solve_partial += 1
 
+                    # Build a view with a single item per episode_id for metrics/logging
+                    seen_episodes = set()
+                    episode_unique_idxs = []
+                    for i, episode_id in enumerate(new_batch.non_tensor_batch["episode_ids"]):
+                        if episode_id not in seen_episodes:
+                            seen_episodes.add(episode_id)
+                            episode_unique_idxs.append(i)
+                    episode_unique_batch = new_batch.select_idxs(episode_unique_idxs)
+
+                    # log metrics from workflows
+                    for metric_dict in episode_unique_batch.non_tensor_batch["metrics"]:
+                        for key, value in metric_dict.items():
+                            workflow_metrics[key].append(value)
+
                     # collect and log termination reasons
-                    termination_reasons = new_batch.non_tensor_batch["termination_reasons"]
+                    termination_reasons = episode_unique_batch.non_tensor_batch["termination_reasons"]
                     termination_counts.update(termination_reasons)
 
                     # If no valid samples remain, skip this batch and get a new one
@@ -348,6 +363,9 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 metrics["batch/solve_all"] = solve_all / num_tasks
                 metrics["batch/solve_partial"] = solve_partial / num_tasks
 
+                for key, value in workflow_metrics.items():
+                    metrics[f"batch/{key}"] = np.mean(value)
+
                 for r in TerminationReason:
                     metrics[f"batch/{r.value}"] = termination_counts[r.value] / num_tasks
 
@@ -362,6 +380,7 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 solve_partial = 0
                 num_tasks = 0
                 termination_counts = Counter()
+                workflow_metrics = defaultdict(list)
                 metrics = {}
                 timing_raw = {}
 
@@ -379,6 +398,8 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
         is_correct_lst = []
         data_source_lst = []
         uid_lst = []
+        workflow_metrics_by_source = defaultdict(lambda: defaultdict(list))
+
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             test_batch.non_tensor_batch["task_ids"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
@@ -419,6 +440,13 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
                 data_sources = ["unknown"] * len(test_batch)
             data_source_lst.extend(data_sources)
 
+            # Collect workflow metrics per episode and data source
+            for i, data_source in enumerate(data_sources):
+                episode_metrics = test_batch.non_tensor_batch["metrics"][i]
+                if episode_metrics is not None:
+                    for key, value in episode_metrics.items():
+                        workflow_metrics_by_source[data_source][key].append(float(value))
+
         metrics = {}
         is_correct_array = np.array(is_correct_lst)
         uid_array = np.array(uid_lst)
@@ -436,6 +464,12 @@ class AgentWorkflowPPOTrainer(RayPPOTrainer):
 
             metrics[f"val/{data_source}/pass@1"] = np.mean(is_correct_data_source)
             metrics[f"val/{data_source}/pass@{n_val_samples}"] = np.mean([1 if any(pass_rate) else 0 for pass_rate in pass_rates.values()])
+
+            # Add workflow metrics for this data source
+            if data_source in workflow_metrics_by_source:
+                for key, values in workflow_metrics_by_source[data_source].items():
+                    if values:  # Only add if we have values
+                        metrics[f"val/{data_source}/{key}"] = np.mean(values)
 
         return metrics
 

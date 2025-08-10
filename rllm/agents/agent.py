@@ -48,6 +48,7 @@ class Episode:
     termination_reason = None
     is_correct: bool = False
     trajectories: list[tuple[str, Trajectory]] = field(default_factory=list)  # [(agent_name, Trajectory), ...]
+    metrics: dict = field(default_factory=dict)
 
     def to_dict(self):
         return {
@@ -56,6 +57,7 @@ class Episode:
             "termination_reason": self.termination_reason.value if self.termination_reason is not None else None,
             "is_correct": bool(self.is_correct),
             "trajectories": [(agent_name, trajectory.to_dict()) for agent_name, trajectory in self.trajectories],
+            "metrics": self.metrics,
         }
 
 

@@ -6,9 +6,8 @@ export VLLM_USE_V1=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_ENGINE_ITERATION_TIMEOUT_S=100000000000
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-
 python3 -m examples.solver_judge.train_solver_judge_flow \
-    data.train_batch_size=8 \
+    data.train_batch_size=16 \
     data.max_prompt_length=2048 \
     data.max_response_length=1024 \
     actor_rollout_ref.model.path=Qwen/Qwen3-0.6B \
@@ -42,7 +41,7 @@ python3 -m examples.solver_judge.train_solver_judge_flow \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.adv_estimator=grpo \
-    algorithm.compact_filtering.enable=True \
+    algorithm.compact_filtering.enable=False \
     algorithm.compact_filtering.mask_max_prompt_length_exceeded=True \
     algorithm.compact_filtering.mask_max_response_length_exceeded=True \
     algorithm.compact_filtering.mask_max_turns_exceeded=False \

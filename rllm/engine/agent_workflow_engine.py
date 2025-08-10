@@ -124,6 +124,7 @@ class AgentWorkflowEngine:
         is_correct = []
         traj_mask = []
         termination_reasons = []
+        metrics = []
 
         for i, episode in enumerate(episodes):
             total_steps = 0
@@ -184,6 +185,7 @@ class AgentWorkflowEngine:
             episode_ids.extend([episode.id] * total_steps)
             is_correct.extend([episode.is_correct] * total_steps)
             termination_reasons.extend([episode.termination_reason if episode.termination_reason is not None else TerminationReason.ENV_DONE] * total_steps)
+            metrics.extend([episode.metrics] * total_steps)
             repeat_counts.append(total_steps)
 
         prompts_batch = torch.nn.utils.rnn.pad_sequence(
@@ -254,6 +256,7 @@ class AgentWorkflowEngine:
                 "step_nums": np.array(step_nums),
                 "is_correct": np.array(is_correct),
                 "termination_reasons": np.array([x.value for x in termination_reasons]),
+                "metrics": np.array(metrics),
                 "is_valid": np.array(is_valid),
                 "is_last_step": np.array(is_last_step),
                 "is_pad_step": np.array([False] * len(episode_ids)),
@@ -267,6 +270,6 @@ class AgentWorkflowEngine:
         if hasattr(self, "executor") and self.executor is not None:
             self.executor.shutdown(wait=True)
             self.executor = None
-        
+
         if hasattr(self, "episode_store") and self.episode_store is not None:
             self.episode_store.close()
