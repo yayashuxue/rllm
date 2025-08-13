@@ -107,6 +107,42 @@ class RLLMModel(Model):
         except (json.JSONDecodeError, ValueError) as e:
             raise ValueError(f"Failed to parse structured output: {e}")
     
+    def _to_openai_tools(self, tool_specs: list[ToolSpec] | None) -> list[dict[str, Any]]:
+        """Convert Strands ToolSpec list to OpenAI chat tools parameter.
+
+        Best-effort mapping: name, description, parameters/schema.
+        """
+        tools_param: list[dict[str, Any]] = []
+        if not tool_specs:
+            return tools_param
+        for spec in tool_specs:
+            try:
+                name = getattr(spec, "name", None) or getattr(spec, "tool_name", None) or "tool"
+                description = getattr(spec, "description", "") or getattr(spec, "desc", "")
+                schema = getattr(spec, "parameters", None) or getattr(spec, "input_schema", None)
+                if schema is None and hasattr(spec, "json"):
+                    js = spec.json
+                    if isinstance(js, dict):
+                        schema = js.get("parameters") or js.get("schema")
+                if schema is None and hasattr(spec, "model_json_schema"):
+                    try:
+                        schema = spec.model_json_schema()
+                    except Exception:
+                        schema = None
+                if schema is None:
+                    schema = {"type": "object", "properties": {}}
+                tools_param.append({
+                    "type": "function",
+                    "function": {
+                        "name": str(name),
+                        "description": str(description),
+                        "parameters": schema,
+                    },
+                })
+            except Exception:
+                continue
+        return tools_param
+
     async def stream(
         self,
         messages: Messages,
@@ -126,24 +162,37 @@ class RLLMModel(Model):
             Formatted message chunks from the model.
         """
         # Convert Strands messages to chat completion format
-        chat_messages = self._convert_messages_to_chat_format(messages, system_prompt)
-        
-        # TODO: Handle tool_specs - for now we'll log a warning if they're provided
+        # Also append a compact tool manifest into system prompt for guidance
+        tool_manifest_text = ""
         if tool_specs:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning("Tool specs are not yet supported with RLLMModel")
+            try:
+                manifest_lines = []
+                for ts in tool_specs:
+                    nm = getattr(ts, "name", getattr(ts, "tool_name", "tool"))
+                    ds = getattr(ts, "description", getattr(ts, "desc", ""))
+                    manifest_lines.append(f"- {nm}: {ds}")
+                if manifest_lines:
+                    tool_manifest_text = "\n\nAvailable tools:\n" + "\n".join(manifest_lines)
+            except Exception:
+                tool_manifest_text = ""
+        effective_system = system_prompt or ""
+        if tool_manifest_text:
+            effective_system = (effective_system + tool_manifest_text).strip()
+        chat_messages = self._convert_messages_to_chat_format(messages, effective_system)
         
         # Yield message start
         yield {"messageStart": {"role": "assistant"}}
         yield {"contentBlockStart": {"start": {}}}
         
         # Get response from rollout engine
+        openai_tools = self._to_openai_tools(tool_specs)
         response_text = await self.rollout_engine.get_model_response(
             chat_messages,
             model=self.config["model_id"],
+            tools=openai_tools if openai_tools else None,
+            tool_choice="auto" if openai_tools else None,
             **self.config.get("params", {}),
-            **kwargs
+            **kwargs,
         )
         
         # Simulate streaming by yielding the response in chunks

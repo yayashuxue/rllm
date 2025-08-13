@@ -1,0 +1,3 @@
+strands-agents
+strands-agents-tools
+bedrock_agentcore # solve strands-agents-tool dependency issue
