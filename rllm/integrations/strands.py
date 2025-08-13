@@ -30,7 +30,7 @@ class RLLMModel(Model):
             "model_id": model_id,
             "params": model_config
         }
-    
+
     def update_config(self, **model_config: Any) -> None:
         """Update the model configuration.
         
@@ -114,16 +114,37 @@ class RLLMModel(Model):
         """
         tools_param: list[dict[str, Any]] = []
         if not tool_specs:
+            print("[RLLMModel._to_openai_tools] no tool_specs provided; returning empty list")
             return tools_param
-        for spec in tool_specs:
+        for index, spec in enumerate(tool_specs):
             try:
-                name = getattr(spec, "name", None) or getattr(spec, "tool_name", None) or "tool"
-                description = getattr(spec, "description", "") or getattr(spec, "desc", "")
-                schema = getattr(spec, "parameters", None) or getattr(spec, "input_schema", None)
+                # Prefer spec from Strands ToolFunc/AgentTool
+                ts_dict = getattr(spec, "tool_spec", None)
+                if ts_dict is None and isinstance(spec, dict) and isinstance(spec.get("toolSpec"), dict):
+                    ts_dict = spec.get("toolSpec")
+                # Name
+                name = (
+                    (ts_dict.get("name") if isinstance(ts_dict, dict) else None)
+                    or getattr(spec, "name", None)
+                    or getattr(spec, "tool_name", None)
+                    or getattr(spec, "__name__", None)
+                    or "tool"
+                )
+                # Description
+                description = (
+                    (ts_dict.get("description") if isinstance(ts_dict, dict) else None)
+                    or getattr(spec, "description", "")
+                    or getattr(spec, "desc", "")
+                )
+                # Schema
+                schema = None
+                if isinstance(ts_dict, dict):
+                    schema = ts_dict.get("inputSchema") or ts_dict.get("parameters") or ts_dict.get("schema")
+                schema = schema or getattr(spec, "parameters", None) or getattr(spec, "input_schema", None)
                 if schema is None and hasattr(spec, "json"):
                     js = spec.json
                     if isinstance(js, dict):
-                        schema = js.get("parameters") or js.get("schema")
+                        schema = js.get("parameters") or js.get("schema") or js.get("inputSchema")
                 if schema is None and hasattr(spec, "model_json_schema"):
                     try:
                         schema = spec.model_json_schema()
@@ -139,7 +160,10 @@ class RLLMModel(Model):
                         "parameters": schema,
                     },
                 })
-            except Exception:
+            except Exception as error:
+                print(
+                    f"[RLLMModel._to_openai_tools] failed to map tool spec at index {index}: {error!r}"
+                )
                 continue
         return tools_param
 
@@ -161,24 +185,8 @@ class RLLMModel(Model):
         Yields:
             Formatted message chunks from the model.
         """
-        # Convert Strands messages to chat completion format
-        # Also append a compact tool manifest into system prompt for guidance
-        tool_manifest_text = ""
-        if tool_specs:
-            try:
-                manifest_lines = []
-                for ts in tool_specs:
-                    nm = getattr(ts, "name", getattr(ts, "tool_name", "tool"))
-                    ds = getattr(ts, "description", getattr(ts, "desc", ""))
-                    manifest_lines.append(f"- {nm}: {ds}")
-                if manifest_lines:
-                    tool_manifest_text = "\n\nAvailable tools:\n" + "\n".join(manifest_lines)
-            except Exception:
-                tool_manifest_text = ""
-        effective_system = system_prompt or ""
-        if tool_manifest_text:
-            effective_system = (effective_system + tool_manifest_text).strip()
-        chat_messages = self._convert_messages_to_chat_format(messages, effective_system)
+        # Convert Strands messages to chat completion format; rely on Strands' own prompting
+        chat_messages = self._convert_messages_to_chat_format(messages, system_prompt or "")
         
         # Yield message start
         yield {"messageStart": {"role": "assistant"}}
@@ -264,6 +272,7 @@ class RLLMModel(Model):
             if text_content.strip():  # Only add if there's actual content
                 chat_messages.append({"role": role, "content": text_content})
         
+        print("[***_convert_messages_to_chat_format***]", chat_messages)
         return chat_messages
 
 
@@ -275,10 +284,14 @@ class StrandsAgent(Agent):
             model: The model to use (can be a string or Model instance)
             **kwargs: Additional arguments to pass to the base Agent class
         """
-            
+        # Capture tools argument before base class potentially wraps/moves it
+        _init_tools = kwargs.get("tools")
+
         super().__init__(model=model, **kwargs)
         self._trajectory = Trajectory()
         self._current_step = None
+
+        # Removed default tool propagation to keep minimal behavior
         
     @property
     def trajectory(self) -> Trajectory:

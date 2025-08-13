@@ -15,7 +15,7 @@ SYSTEM_PROMPT = (
     "- Decide buckets (time ranges, site:, numeric thresholds, role keywords) and navigate accordingly.\n"
     "- Extract only: city, year, organizer_name, organizer_last_initial, attendance, source_url.\n"
     "- Use the 'browser' tool with actions: init_session, list_local_sessions, navigate, click, type, evaluate, press_key, get_text, get_html, screenshot, refresh, back, forward, new_tab, switch_tab, close_tab, list_tabs, get_cookies, set_cookies, network_intercept, execute_cdp, close.\n"
-    "- Common required fields: init_session{session_name, description}; navigate{url}; click{selector}; type{selector, text}; get_text{selector}.\n"
+    "- Common required fields: init_session{session_name(^[a-z0-9-]+$), description}; navigate{url}; click{selector}; type{selector, text}; get_text{selector}.\n"
     "- Prefer get_text/get_html for extraction; use navigate with explicit URLs.\n"
     "- If CAPTCHA encountered, immediately switch to DuckDuckGo (https://duckduckgo.com/?q=...) or Bing and continue.\n\n"
     "STRICT OUTPUT (2 lines only):\n"
@@ -48,17 +48,24 @@ def parse_action(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         return None, thought
 
 
-def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Fill required fields for known browser actions when missing (safe defaults)."""
-    action = args.get("action", {})
-    if not isinstance(action, dict):
-        return {"action": {}}
-    t = action.get("type")
-    if t == "init_session":
-        action.setdefault("session_name", "main-session")
-        action.setdefault("description", "Web research session")
-    # Add other lightweight normalizations here if needed
-    return {"action": action}
+def make_normalize_fn(session_ref: Dict[str, str]):
+    def _normalize(args: Dict[str, Any]) -> Dict[str, Any]:
+        action = args.get("action", {})
+        if not isinstance(action, dict):
+            return {"action": {}}
+        t = action.get("type")
+        if t == "init_session":
+            # Ensure valid defaults and pattern-safe session name
+            name = action.get("session_name") or session_ref.get("name") or "main-session"
+            name = str(name).lower().replace("_", "-")
+            action["session_name"] = name
+            action.setdefault("description", "Web research session")
+        else:
+            # Most actions require session_name; inject last known
+            if "session_name" not in action:
+                action["session_name"] = session_ref.get("name") or "main-session"
+        return {"action": action}
+    return _normalize
 
 async def main():
     load_dotenv(find_dotenv())
@@ -86,7 +93,7 @@ async def main():
     question = os.getenv(
         "QUESTION",
         # "There was an early Christian poetic hymn composed by a late antique writer who passed away around the mid-5th century. The year of this writer’s death coincides with the last year of a scientific chronology that reconstructs environmental conditions from several centuries before the modern era. What is the name of this chronology?",
-        "A musical piece closely associated with a prominent South American capital features lyrics written by a notable figure who was later recognized with a distinguished local civic honor in the early 21st century. The composition’s melody was created by a musician who received formal training at a respected arts institution in western Colombia. What is the name of this musical piece?",
+        # "A musical piece closely associated with a prominent South American capital features lyrics written by a notable figure who was later recognized with a distinguished local civic honor in the early 21st century. The composition’s melody was created by a musician who received formal training at a respected arts institution in western Colombia. What is the name of this musical piece?",
     )
 
     print("=== Strands Browser Research (minimal) ===")
@@ -96,23 +103,12 @@ async def main():
     print(question)
 
     try:
-        # Initialize a browser session explicitly to encourage stable behavior
-        init_payload = {
-            "action": {
-                "type": "init_session",
-                "session_name": "main-session",
-                "description": "Web research session"
-            }
-        }
-        init_result = browser.browser(init_payload)
-        if asyncio.iscoroutine(init_result):
-            init_result = await init_result
-        print("\n--- Browser init ---")
-        print(json.dumps(init_result, ensure_ascii=False)[:400])
 
         # Minimal loop: use StrandsAgent for planning, we execute browser actions
         history: list[str] = []
         max_steps = int(os.getenv("MAX_STEPS", "30"))
+        session_state: Dict[str, str] = {"name": "main-session"}
+        normalize_browser_args = make_normalize_fn(session_state)
         for step in range(1, max_steps + 1):
             print(f"[step {step}] Building prompt", flush=True)
             user = USER_TEMPLATE.format(question=question, history="\n".join(history))
@@ -147,6 +143,15 @@ async def main():
                     result = browser.browser(safe_args)
                     if asyncio.iscoroutine(result):
                         result = await result
+                    # Track session name once initialized
+                    try:
+                        act = safe_args.get("action", {})
+                        if act.get("type") == "init_session":
+                            sn = act.get("session_name")
+                            if isinstance(sn, str) and sn:
+                                session_state["name"] = sn
+                    except Exception:
+                        pass
                     obs = result if isinstance(result, dict) else {"result": result}
                 else:
                     obs = {"error": f"unknown action: {name}"}
