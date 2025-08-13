@@ -16,6 +16,8 @@ class RolloutEngine:
 
         self.tokenizer = tokenizer
         self.chat_parser = chat_parser
+        # NOTE(julie): For OpenAI engine we should not use the presence of chat_parser to
+        #              decide the API route; always use chat API to avoid v1/completions 404s
         if self.chat_parser is None and self.tokenizer is not None:
             self.chat_parser = ChatTemplateParser.get_parser(self.tokenizer, disable_thinking=kwargs.get("disable_thinking", False))
         elif self.chat_parser is not None and self.tokenizer is None:
@@ -67,14 +69,81 @@ class RolloutEngine:
         """
 
         if self.engine_name == "openai":
-            if self.chat_parser is None:
-                return await self._get_response_openai_chat(messages, **kwargs)
-            else:
-                return await self._get_response_openai(messages, **kwargs)
+            # NOTE(julie): Always route OpenAI to chat API; older completions path
+            #              causes 404 with chat models like gpt-4o when tokenizer is provided.
+            response = await self._get_response_openai_chat(messages, **kwargs)
+            # Fallback: if endpoint doesn't support chat API, try completions
+            if isinstance(response, str) and response.startswith("Error processing content:"):
+                err = response
+                if any(x in err for x in ["404", "Not Found", "Endpoint", "v1/chat/completions"]):
+                    return await self._get_response_openai(messages, **kwargs)
+            return response
         elif self.engine_name == "verl":
             return await self._get_response_verl(messages, **kwargs)
         else:
             raise NotImplementedError(f"Engine type '{self.engine_name}' not supported")
+
+    def _convert_messages_verl(self, messages, **kwargs):
+        """
+        Given a list of messages to convert to DataProto format in veRL
+
+        Args:
+            messagses: List of chat completion messages to convert
+            **kwargs: Additional arguments
+
+        Returns:
+            DataProto object containing the converted prompts
+        """
+        from verl import DataProto
+        from verl.protocol import union_two_dict
+        from verl.utils.model import compute_position_id_with_mask
+        from verl.utils.torch_functional import pad_sequence_to_length
+
+        old_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
+        formatted_prompts = [self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True) for prompt in messages]
+
+        # Tokenize the final processed strings
+        inputs = self.tokenizer(
+            formatted_prompts,
+            padding=True,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        self.tokenizer.padding_side = old_padding_side
+
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+
+        # pad to max sizes
+        input_ids = pad_sequence_to_length(input_ids, max_seq_len=self.max_prompt_length, pad_token_id=self.tokenizer.pad_token_id, left_pad=True)
+        attention_mask = pad_sequence_to_length(attention_mask, max_seq_len=self.max_prompt_length, pad_token_id=0, left_pad=True)
+        position_ids = compute_position_id_with_mask(attention_mask)
+        batch_dict = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }
+        data = DataProto.from_dict(batch_dict)
+        data.non_tensor_batch["formatted_prompts"] = np.array(formatted_prompts)
+
+        # original_batch contains the extra info needed for generation
+        if "meta_info" in kwargs and kwargs["meta_info"]:
+            meta_info = kwargs["meta_info"]
+            # only use the original_batch's meta_info since tensor_batch is from batch_dict and non_tensor_batch is not neeeded
+            data.meta_info = union_two_dict(data.meta_info, meta_info)
+
+        return data
+
+    def _messages_to_prompt(self, messages: list[dict]) -> str:
+        """Naively format chat messages into a single text prompt for completions."""
+        parts = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            parts.append(f"{role}: {content}")
+        return "\n".join(parts) + "\nassistant:"
 
     async def _get_response_verl(self, messages: list[dict], application_id: str | None = None, **kwargs) -> str:        
         batch = self._convert_messages_verl([messages], **kwargs)
@@ -144,7 +213,11 @@ class RolloutEngine:
                     print("Error: ", e)
                     return f"Error processing content: {e}"
 
-        prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
+        # NOTE(julie): Allow completions without chat_parser by naive formatting
+        if self.chat_parser is None:
+            prompt = self._messages_to_prompt(messages)
+        else:
+            prompt = self.chat_parser.parse(messages, add_generation_prompt=True, is_first_msg=True)
         response = await get_response(prompt)
         if isinstance(response, openai.types.Completion):
             response = response.choices[0].text
@@ -190,56 +263,3 @@ class RolloutEngine:
         if isinstance(response, openai.types.chat.ChatCompletion):
             response = response.choices[0].message.content
         return response
-
-    def _convert_messages_verl(self, messages, **kwargs):
-        """
-        Given a list of messages to convert to DataProto format in veRL
-
-        Args:
-            messagses: List of chat completion messages to convert
-            **kwargs: Additional arguments
-
-        Returns:
-            DataProto object containing the converted prompts
-        """
-        from verl import DataProto
-        from verl.protocol import union_two_dict
-        from verl.utils.model import compute_position_id_with_mask
-        from verl.utils.torch_functional import pad_sequence_to_length
-
-        old_padding_side = self.tokenizer.padding_side
-        self.tokenizer.padding_side = "left"
-
-        formatted_prompts = [self.chat_parser.parse(prompt, add_generation_prompt=True, is_first_msg=True) for prompt in messages]
-
-        # Tokenize the final processed strings
-        inputs = self.tokenizer(
-            formatted_prompts,
-            padding=True,
-            return_tensors="pt",
-            add_special_tokens=False,
-        )
-        self.tokenizer.padding_side = old_padding_side
-
-        input_ids = inputs["input_ids"]
-        attention_mask = inputs["attention_mask"]
-
-        # pad to max sizes
-        input_ids = pad_sequence_to_length(input_ids, max_seq_len=self.max_prompt_length, pad_token_id=self.tokenizer.pad_token_id, left_pad=True)
-        attention_mask = pad_sequence_to_length(attention_mask, max_seq_len=self.max_prompt_length, pad_token_id=0, left_pad=True)
-        position_ids = compute_position_id_with_mask(attention_mask)
-        batch_dict = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-        }
-        data = DataProto.from_dict(batch_dict)
-        data.non_tensor_batch["formatted_prompts"] = np.array(formatted_prompts)
-
-        # original_batch contains the extra info needed for generation
-        if "meta_info" in kwargs and kwargs["meta_info"]:
-            meta_info = kwargs["meta_info"]
-            # only use the original_batch's meta_info since tensor_batch is from batch_dict and non_tensor_batch is not neeeded
-            data.meta_info = union_two_dict(data.meta_info, meta_info)
-
-        return data
