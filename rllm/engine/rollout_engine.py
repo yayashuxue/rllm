@@ -239,6 +239,9 @@ class RolloutEngine:
         if kwargs.get("model", "").startswith("o") and kwargs.get("max_tokens"):
             del kwargs["max_tokens"]
 
+        # Internal flag to request structured message dict instead of plain text
+        return_message_dict = kwargs.pop("return_message_dict", False)
+
         async def get_response(messages: list[dict]):
             retries = self.api_retries
             while retries > 0:
@@ -261,5 +264,29 @@ class RolloutEngine:
 
         response = await get_response(messages)
         if isinstance(response, openai.types.chat.ChatCompletion):
-            response = response.choices[0].message.content
+            message = response.choices[0].message
+            if return_message_dict:
+                # Safely extract minimal tool_calls info if present
+                tool_calls_list = []
+                try:
+                    tool_calls = getattr(message, "tool_calls", None)
+                    if tool_calls:
+                        for call in tool_calls:
+                            try:
+                                fn = getattr(call, "function", None)
+                                if fn is None:
+                                    continue
+                                tool_calls_list.append({
+                                    "name": getattr(fn, "name", None),
+                                    "arguments": getattr(fn, "arguments", None),
+                                })
+                            except Exception:
+                                continue
+                except Exception:
+                    tool_calls_list = []
+                return {
+                    "content": getattr(message, "content", None) or "",
+                    "tool_calls": tool_calls_list,
+                }
+            return message.content
         return response

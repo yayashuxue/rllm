@@ -30,6 +30,8 @@ class RLLMModel(Model):
             "model_id": model_id,
             "params": model_config
         }
+        # Optional default tool specs to use when the caller (Agent) does not pass any
+        self._default_tool_specs: list[ToolSpec] | None = None
 
     def update_config(self, **model_config: Any) -> None:
         """Update the model configuration.
@@ -43,6 +45,14 @@ class RLLMModel(Model):
         if "params" not in self.config:
             self.config["params"] = {}
         self.config["params"].update(model_config)
+    
+    def set_default_tool_specs(self, tool_specs: list[ToolSpec] | None) -> None:
+        """Set default tool specs used when the caller omits tool_specs.
+        
+        Args:
+            tool_specs: Default tool specifications to use
+        """
+        self._default_tool_specs = tool_specs
     
     def get_config(self) -> dict[str, Any]:
         """Get the model configuration.
@@ -114,7 +124,6 @@ class RLLMModel(Model):
         """
         tools_param: list[dict[str, Any]] = []
         if not tool_specs:
-            print("[RLLMModel._to_openai_tools] no tool_specs provided; returning empty list")
             return tools_param
         for index, spec in enumerate(tool_specs):
             try:
@@ -193,7 +202,9 @@ class RLLMModel(Model):
         yield {"contentBlockStart": {"start": {}}}
         
         # Get response from rollout engine
-        openai_tools = self._to_openai_tools(tool_specs)
+        # Prefer explicitly provided tool specs; fall back to defaults, if any
+        effective_tool_specs = tool_specs if tool_specs is not None else self._default_tool_specs
+        openai_tools = self._to_openai_tools(effective_tool_specs)
         response_text = await self.rollout_engine.get_model_response(
             chat_messages,
             model=self.config["model_id"],
@@ -272,7 +283,7 @@ class RLLMModel(Model):
             if text_content.strip():  # Only add if there's actual content
                 chat_messages.append({"role": role, "content": text_content})
         
-        print("[***_convert_messages_to_chat_format***]", chat_messages)
+        # print("[***_convert_messages_to_chat_format***]", chat_messages)
         return chat_messages
 
 
@@ -291,7 +302,12 @@ class StrandsAgent(Agent):
         self._trajectory = Trajectory()
         self._current_step = None
 
-        # Removed default tool propagation to keep minimal behavior
+        # Auto-inject default tool specs into RLLMModel for downstream tool-aware backends
+        try:
+            if isinstance(self.model, RLLMModel) and _init_tools:
+                self.model.set_default_tool_specs(_init_tools)
+        except Exception:
+            pass
         
     @property
     def trajectory(self) -> Trajectory:

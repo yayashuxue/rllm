@@ -196,3 +196,7 @@ rllm/registry/
 *.db
 pdfs/
 *.pdf
+CLAUDE.md
+examples/strands/CLAUDE.md
+examples/strands/IMPLEMENTATION_PLAN.md
+examples/strands/TODO.md

@@ -16,5 +16,8 @@ Build agents that can search and retrieve information effectively.
 ### 🎮 [Frozenlake Agent](frozenlake.md)
 Classic RL examples using environments like FrozenLake.
 
+### 🌐 [Strands Integration](strands-integration.md)
+Comprehensive guide to training web-capable agents using rLLM + Strands integration. Covers browser automation, tool ecosystem integration, and RL training pipeline.
+
 ### 📚 [Math SFT Training](sft.md)
 Supervised fine-tuning of base math models(e.g. Qwen/Qwen2.5-Math-1.5B) using high-quality trajectories generated from teacher models (e.g. DeepScaleR)
