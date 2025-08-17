@@ -194,6 +194,7 @@ class RLLMModel(Model):
         Yields:
             Formatted message chunks from the model.
         """
+        
         # Convert Strands messages to chat completion format; rely on Strands' own prompting
         chat_messages = self._convert_messages_to_chat_format(messages, system_prompt or "")
         
@@ -205,14 +206,29 @@ class RLLMModel(Model):
         # Prefer explicitly provided tool specs; fall back to defaults, if any
         effective_tool_specs = tool_specs if tool_specs is not None else self._default_tool_specs
         openai_tools = self._to_openai_tools(effective_tool_specs)
-        response_text = await self.rollout_engine.get_model_response(
-            chat_messages,
-            model=self.config["model_id"],
-            tools=openai_tools if openai_tools else None,
-            tool_choice="auto" if openai_tools else None,
-            **self.config.get("params", {}),
-            **kwargs,
-        )
+        try:
+            # GPT-OSS doesn't support tools parameter
+            request_kwargs = {
+                "model": self.config["model_id"],
+                **self.config.get("params", {}),
+                **kwargs,
+            }
+            model_id = self.config["model_id"]
+            if not (model_id and "gpt-oss" in model_id):
+                request_kwargs["tools"] = openai_tools if openai_tools else None
+                request_kwargs["tool_choice"] = "auto" if openai_tools else None
+                
+            response_text = await self.rollout_engine.get_model_response(
+                chat_messages,
+                **request_kwargs
+            )
+            if response_text is None:
+                response_text = ""
+        except Exception as e:
+            response_text = ""
+        
+        if response_text is None:
+            response_text = ""
         
         # Simulate streaming by yielding the response in chunks
         # In a real streaming implementation, you'd want to modify RolloutEngine to support streaming
@@ -255,35 +271,65 @@ class RLLMModel(Model):
         Returns:
             List of chat completion messages
         """
+        
         chat_messages = []
         
         # Add system prompt if provided
         if system_prompt:
             chat_messages.append({"role": "system", "content": system_prompt})
         
-        for message in messages:
-            role = message["role"]
-            content = message["content"]
+        if not messages:
+            return chat_messages
+        
+        for i, message in enumerate(messages):
+            if not message:
+                continue
+            
+            if not isinstance(message, dict):
+                continue
+                
+            role = message.get("role", "user")
+            content = message.get("content")
             
             # Extract text content from Strands format
             text_content = ""
-            for content_block in content:
-                if "text" in content_block:
-                    text_content += content_block["text"]
-                elif "toolUse" in content_block:
-                    # For now, represent tool use as text
-                    tool_use = content_block["toolUse"]
-                    text_content += f"[Tool: {tool_use['name']} with input: {tool_use.get('input', {})}]"
-                elif "toolResult" in content_block:
-                    # For now, represent tool result as text
-                    tool_result = content_block["toolResult"]
-                    text_content += f"[Tool Result: {tool_result.get('content', [])}]"
-                # TODO: Handle other content types like images, documents if needed
+            if content is None:
+                continue
+            elif isinstance(content, list):
+                for j, content_block in enumerate(content):
+                    if not content_block:
+                        continue
+                    if not isinstance(content_block, dict):
+                        continue
+                    
+                    if "text" in content_block:
+                        text_val = content_block["text"]
+                        if text_val is not None:
+                            text_content += str(text_val)
+                    elif "toolUse" in content_block:
+                        # For now, represent tool use as text
+                        tool_use = content_block.get("toolUse")
+                        if tool_use and isinstance(tool_use, dict):
+                            tool_name = tool_use.get('name', 'unknown')
+                            tool_input = tool_use.get('input', {})
+                            if tool_name is not None and tool_input is not None:
+                                text_content += f"[Tool: {tool_name} with input: {tool_input}]"
+                    elif "toolResult" in content_block:
+                        # For now, represent tool result as text
+                        tool_result = content_block.get("toolResult")
+                        if tool_result and isinstance(tool_result, dict):
+                            tool_content = tool_result.get('content', [])
+                            if tool_content is not None:
+                                text_content += f"[Tool Result: {tool_content}]"
+                    # TODO: Handle other content types like images, documents if needed
+            elif content:
+                # Handle case where content is a string instead of list
+                text_content = str(content)
             
             if text_content.strip():  # Only add if there's actual content
-                chat_messages.append({"role": role, "content": text_content})
+                chat_message = {"role": role, "content": text_content}
+                chat_messages.append(chat_message)
         
-        # print("[***_convert_messages_to_chat_format***]", chat_messages)
         return chat_messages
 
 

@@ -16,33 +16,43 @@ except ImportError:
 
 
 SYSTEM_PROMPT = """
-You are a lean web research agent using a single 'browser' tool. Minimize steps by cutting uncertainty.
+You are a web research agent using a 'browser' tool. Follow the MANDATORY workflow to avoid loops.
+
+MANDATORY WORKFLOW (must follow in order):
+1. navigate to search page → get_text to read results → navigate to promising result → get_text to extract content
+2. If no useful content found: try different search terms or sources
+3. Once you have sufficient info: final_answer
 
 Planning & State (in Thought line):
 - First declare Schema=[field1, field2, ...] (compact, task-specific; agent-defined).
-- State focus_dim=<time|geo|definition|number> and briefly note bucket plan (e.g., 2010..2012, site:.gov, keyword: inaugural, threshold:>50,000).
+- State focus_dim=<time|geo|definition|number> and brief reasoning (<80 tokens).
+- Always mention your current workflow step (navigate/get_text/analyze/conclude).
 
 Tooling:
-- Use the 'browser' tool. Only use action types listed in the injected tool manifest.
-- NEVER invent other tools or action types. NO 'search' action - use 'navigate' to search engines instead.
-- To search: navigate to "https://duckduckgo.com/?q=your+search+terms" or similar search engines.
-- Prefer evaluate/get_text/get_html for targeted extraction. When using evaluate, return a JSON object matching your Schema.
-- If CAPTCHA encountered, immediately switch to DuckDuckGo (https://duckduckgo.com/?q=...) or Bing and continue.
+- Use ONLY the 'browser' tool with actions from the manifest.
+- NEVER repeat the same navigate action - always follow with get_text!
+- To search: navigate to "https://duckduckgo.com/?q=your+search+terms"
+- After navigate: MUST use get_text with selector (required parameter)
+- Safe selectors: "body" (full page), "main", "[data-testid]", "h1,h2,h3", "p"
+- Example: {"type":"get_text","selector":"body"} - reads full page text
+- If selector times out, try simpler ones: "body" > "main" > "p" > get_html
+- For extraction: use evaluate with JSON matching your Schema
+- If stuck in loops: change search terms or conclude with available info
 
 STRICT OUTPUT (2 lines only):
-Thought: <Schema=[...]; focus_dim=...; brief reasoning (<80 tokens)>
-Action: {"name":"browser","arguments":{"action":{"type":"<one of allowed actions>", ...}}}
+Thought: <Schema=[...]; workflow_step=navigate/get_text/conclude; reasoning>
+Action: {"name":"browser","arguments":{"action":{"type":"<action>", ...}}}
 OR
 Action: {"name":"final_answer","arguments":{"answer":"..."}}
 """
 
-USER_TEMPLATE = """
-Question: {question}
-History:
-{history}
+USER_TEMPLATE = """Question: {question}
+History: {history}
 {schema_hint}
-Now produce the next Thought and Action.
-"""
+
+Output EXACTLY 2 lines:
+Thought: [analysis]
+Action: [JSON]"""
 
 ACTION_RE = re.compile("Action:\s*(\{.*\})", re.DOTALL | re.IGNORECASE)
 SCHEMA_RE = re.compile("Schema\s*:\s*(\[[^\]]*\])", re.IGNORECASE)
@@ -88,7 +98,8 @@ def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
         # For all other actions, ensure a session is targeted unless the action
         # does not require one (e.g., listing local sessions)
         if t and t != "list_local_sessions":
-            action.setdefault("session_name", "main-session")
+            # Force session_name to main-session to avoid creative naming by models
+            action["session_name"] = "main-session"
     return {"action": action}
 
 # fallback allowlist for strands browser action types (snake_case)
@@ -210,15 +221,39 @@ async def main():
     from transformers import AutoTokenizer
     tokenizer_model = os.getenv("TOKENIZER_MODEL", "Qwen/Qwen3-4B")
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
-    openai_kwargs: Dict[str, Any] = {}
-    base_url = os.getenv("OPENAI_BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if base_url:
-        openai_kwargs["base_url"] = base_url
-    if api_key:
-        openai_kwargs["api_key"] = api_key
+    
+    together_api_key = os.getenv("TOGETHER_AI_API_KEY")
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    
+    if together_api_key:
+        openai_kwargs = {"api_key": together_api_key, "base_url": "https://api.together.xyz/v1"}
+        model_name = os.getenv("TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo")
+        if model_name == "gpt-oss":
+            model_id = "openai/gpt-oss-120b" 
+        else:
+            model_id = model_name
+    elif openai_api_key:
+        openai_kwargs = {"api_key": openai_api_key}
+        if os.getenv("OPENAI_BASE_URL"):
+            openai_kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
+        model_id = os.getenv("MODEL_NAME", "gpt-4o")
+    else:
+        raise ValueError("API key required")
+    
     rollout_engine = RolloutEngine(engine_name="openai", tokenizer=tokenizer, openai_kwargs=openai_kwargs)
-    model = RLLMModel(rollout_engine=rollout_engine, model_id=os.getenv("MODEL_NAME", "gpt-4o"), max_tokens=350, temperature=0.2)
+    
+    # Adjust parameters based on model capabilities  
+    if "gpt-oss" in model_id:
+        max_tokens = 100  # Very short responses
+        temperature = 0.0  # Deterministic
+        # Disable o1-style reasoning with specific parameters
+        extra_params = {"reasoning": False, "stream": False}
+    else:
+        max_tokens = 350
+        temperature = 0.7
+        extra_params = {}
+        
+    model = RLLMModel(rollout_engine=rollout_engine, model_id=model_id, max_tokens=max_tokens, temperature=temperature, **extra_params)
 
     headless = os.getenv("BROWSER_HEADLESS", "true").lower() in ("1", "true", "yes")
     try:
@@ -284,15 +319,16 @@ async def main():
         # RL-integrated loop: try tool_calls first, fall back to text parsing
         history: list[str] = []
         current_schema: Optional[list] = None
-        max_steps = int(os.getenv("MAX_STEPS", "5"))
+        max_steps = 5 if not together_api_key else int(os.getenv("MAX_STEPS", "50"))
         for step in range(1, max_steps + 1):
             print(f"[step {step}] Building prompt", flush=True)
             schema_hint = f"Current Schema: {json.dumps(current_schema)}" if current_schema else ""
             user = USER_TEMPLATE.format(question=question, history="".join(history), schema_hint=schema_hint)
             
-            # Try tool_calls path first (if supported)
+            # Try tool_calls path first (if supported and not GPT-OSS)
             tool_calls_handled = False
-            if browser_tools:
+            model_id = agent.model.get_config().get('model_id', '')
+            if browser_tools and "gpt-oss" not in model_id:
                 try:
                     print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (prefer tool_calls)...", flush=True)
                     # Direct call to rollout engine to get structured response
@@ -368,15 +404,16 @@ async def main():
             # Fallback to text parsing (always goes through StrandsAgent for RL tracking)
             print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (text fallback)...", flush=True)
             resp = await agent.invoke_async(user)
-            text = str(resp)
-            preview = text.replace("\n", " ")[:200]
+            text = str(resp) if resp is not None else ""
+            preview = text.replace("\n", " ")[:200] if text else "(empty)"
             print(f"[step {step}] LLM output: {preview}{'...' if len(text) > 200 else ''}", flush=True)
             action, thought = parse_action(text)
             history.append(f"Thought: {thought or '(missing)'}")
             try:
-                sch = parse_schema(thought)
-                if sch:
-                    current_schema = sch
+                if thought:
+                    sch = parse_schema(thought)
+                    if sch:
+                        current_schema = sch
             except Exception:
                 pass
             if not action or "name" not in action:

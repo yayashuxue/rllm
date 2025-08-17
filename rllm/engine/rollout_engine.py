@@ -239,6 +239,10 @@ class RolloutEngine:
         if kwargs.get("model", "").startswith("o") and kwargs.get("max_tokens"):
             del kwargs["max_tokens"]
 
+        # GPT-OSS doesn't support tools parameter
+        if kwargs.get("model", "").endswith("gpt-oss-120b") and "tools" in kwargs:
+            del kwargs["tools"]
+
         # Internal flag to request structured message dict instead of plain text
         return_message_dict = kwargs.pop("return_message_dict", False)
 
