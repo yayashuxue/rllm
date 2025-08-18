@@ -31,7 +31,7 @@ Planning & State (in Thought line):
 Tooling:
 - Use ONLY the 'browser' tool with actions from the manifest.
 - NEVER repeat the same navigate action - always follow with get_text!
-- To search: navigate to "https://duckduckgo.com/?q=your+search+terms"
+- To search: navigate to "https://duckduckgo.com/html/?q==your+search+terms"
 - After navigate: MUST use get_text with selector (required parameter)
 - Safe selectors: "body" (full page), "main", "[data-testid]", "h1,h2,h3", "p"
 - Example: {"type":"get_text","selector":"body"} - reads full page text
@@ -94,12 +94,7 @@ def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
     if t == "init_session":
         action.setdefault("session_name", "main-session")
         action.setdefault("description", "Web research session")
-    else:
-        # For all other actions, ensure a session is targeted unless the action
-        # does not require one (e.g., listing local sessions)
-        if t and t != "list_local_sessions":
-            # Force session_name to main-session to avoid creative naming by models
-            action["session_name"] = "main-session"
+    # Remove automatic session_name injection - let the browser tool handle it
     return {"action": action}
 
 # fallback allowlist for strands browser action types (snake_case)
@@ -178,7 +173,6 @@ class BrowserExecutor:
                         "action": {
                             "type": "navigate",
                             "url": f"https://duckduckgo.com/?q={query}",
-                            "session_name": action.get("session_name", "main-session"),
                         }
                     }
         except Exception:
@@ -227,11 +221,7 @@ async def main():
     
     if together_api_key:
         openai_kwargs = {"api_key": together_api_key, "base_url": "https://api.together.xyz/v1"}
-        model_name = os.getenv("TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo")
-        if model_name == "gpt-oss":
-            model_id = "openai/gpt-oss-120b" 
-        else:
-            model_id = model_name
+        model_id = os.getenv("TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo")
     elif openai_api_key:
         openai_kwargs = {"api_key": openai_api_key}
         if os.getenv("OPENAI_BASE_URL"):
@@ -242,18 +232,10 @@ async def main():
     
     rollout_engine = RolloutEngine(engine_name="openai", tokenizer=tokenizer, openai_kwargs=openai_kwargs)
     
-    # Adjust parameters based on model capabilities  
-    if "gpt-oss" in model_id:
-        max_tokens = 100  # Very short responses
-        temperature = 0.0  # Deterministic
-        # Disable o1-style reasoning with specific parameters
-        extra_params = {"reasoning": False, "stream": False}
-    else:
-        max_tokens = 350
-        temperature = 0.7
-        extra_params = {}
+    max_tokens = 1000
+    temperature = 0.2
         
-    model = RLLMModel(rollout_engine=rollout_engine, model_id=model_id, max_tokens=max_tokens, temperature=temperature, **extra_params)
+    model = RLLMModel(rollout_engine=rollout_engine, model_id=model_id, max_tokens=max_tokens, temperature=temperature)
 
     headless = os.getenv("BROWSER_HEADLESS", "true").lower() in ("1", "true", "yes")
     try:
@@ -275,7 +257,8 @@ async def main():
     question = os.getenv(
         "QUESTION",
         # "There was an early Christian poetic hymn composed by a late antique writer who passed away around the mid-5th century. The year of this writer's death coincides with the last year of a scientific chronology that reconstructs environmental conditions from several centuries before the modern era. What is the name of this chronology?",
-        "Ap musical piece closely associated with a prominent South American capital features lyrics written by a notable figure who was later recognized with a distinguished local civic honor in the early 21st century. The composition's melody was created by a musician who received formal training at a respected arts institution in western Colombia. What is the name of this musical piece?",
+        # "Ap musical piece closely associated with a prominent South American capital features lyrics written by a notable figure who was later recognized with a distinguished local civic honor in the early 21st century. The composition's melody was created by a musician who received formal training at a respected arts institution in western Colombia. What is the name of this musical piece?",
+        "加州最古老的poker room是哪家？"
     )
 
     print("=== Strands Browser Research (minimal) ===")
@@ -285,19 +268,23 @@ async def main():
     print(question)
 
     try:
-        # Initialize a browser session explicitly to encourage stable behavior
-        init_payload = {
-            "action": {
-                "type": "init_session",
-                "session_name": "main-session",
-                "description": "Web research session"
+        # Initialize a browser session if supported (optional)
+        try:
+            init_payload = {
+                "action": {
+                    "type": "init_session",
+                    "session_name": "main-session",
+                    "description": "Web research session"
+                }
             }
-        }
-        init_result = browser.browser(init_payload)
-        if asyncio.iscoroutine(init_result):
-            init_result = await init_result
-        print("\n--- Browser init ---")
-        print(json.dumps(init_result, ensure_ascii=False)[:400])
+            init_result = browser.browser(init_payload)
+            if asyncio.iscoroutine(init_result):
+                init_result = await init_result
+            print("\n--- Browser init ---")
+            print(json.dumps(init_result, ensure_ascii=False)[:400])
+        except Exception as e:
+            print(f"\n--- Browser init skipped: {e} ---")
+            # Continue without session management if not supported
 
         # Build tool spec for direct tool_calls support
         browser_tools = []
@@ -319,16 +306,16 @@ async def main():
         # RL-integrated loop: try tool_calls first, fall back to text parsing
         history: list[str] = []
         current_schema: Optional[list] = None
-        max_steps = 5 if not together_api_key else int(os.getenv("MAX_STEPS", "50"))
+        max_steps = 10 if not together_api_key else int(os.getenv("MAX_STEPS", "30"))
         for step in range(1, max_steps + 1):
             print(f"[step {step}] Building prompt", flush=True)
             schema_hint = f"Current Schema: {json.dumps(current_schema)}" if current_schema else ""
             user = USER_TEMPLATE.format(question=question, history="".join(history), schema_hint=schema_hint)
             
-            # Try tool_calls path first (if supported and not GPT-OSS)
+            # Try tool_calls path first (if supported)
             tool_calls_handled = False
             model_id = agent.model.get_config().get('model_id', '')
-            if browser_tools and "gpt-oss" not in model_id:
+            if browser_tools:
                 try:
                     print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (prefer tool_calls)...", flush=True)
                     # Direct call to rollout engine to get structured response
@@ -453,7 +440,7 @@ async def main():
         try:
             if hasattr(browser, 'browser') and callable(getattr(browser, 'browser')):
                 # Use the browser method with close action
-                close_action = {"action": {"type": "close", "session_name": "main-session"}}
+                close_action = {"action": {"type": "close"}}
                 browser.browser(close_action)
             elif hasattr(browser, 'quit'):
                 browser.quit()
