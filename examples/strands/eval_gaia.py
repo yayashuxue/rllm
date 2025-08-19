@@ -15,6 +15,10 @@ from rllm.data.utils import load_dataset
 from rllm.data.dataset_types import TestDataset
 from rllm.integrations.strands import StrandsAgent
 from agent_factory import create_browser_agent, parse_action, parse_schema, USER_TEMPLATE, BrowserInput
+from strands_tools.http_request import http_request
+from strands_tools.file_read import file_read
+from strands_tools.calculator import calculator
+from strands_tools.python_repl import python_repl
 
 
 class GAIAWorkflow:
@@ -24,6 +28,9 @@ class GAIAWorkflow:
         self.agent = agent
         self.browser = browser
         self.executor = executor
+        # Debug/trace controls
+        self.debug = os.getenv("GAIA_DEBUG", "0") == "1"
+        self._printed_header = False
         
     async def run_single_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Run a single GAIA task and return results."""
@@ -57,6 +64,24 @@ class GAIAWorkflow:
             
             # Reset agent trajectory for new task
             self.agent.reset_trajectory(task=task)
+            # Print initialization info once per task if debug
+            if self.debug and not self._printed_header:
+                try:
+                    print("\n--- System Prompt ---\n" + (self.agent.system_prompt or "") + "\n---------------------")
+                except Exception:
+                    pass
+                try:
+                    default_tools = getattr(self.agent.model, "_default_tool_specs", None) or []
+                    tool_names = [
+                        getattr(t, "name", None) or getattr(t, "tool_name", None) or getattr(t, "__name__", "tool")
+                        for t in default_tools
+                    ]
+                    print("Tools registered:", ", ".join(tool_names))
+                    if self.executor:
+                        print(f"Browser actions available: {len(self.executor.allowed)}")
+                except Exception:
+                    pass
+                self._printed_header = True
             
             # Run the interactive task workflow (like v2)
             final_answer = await self._run_interactive_task(question)
@@ -95,10 +120,36 @@ class GAIAWorkflow:
             # Clean up browser session if available
             if self.browser:
                 try:
-                    close_action = {"action": {"type": "close"}}
+                    close_action = {"action": {"type": "close", "session_name": "main-session"}}
                     self.browser.browser(close_action)
                 except Exception as cleanup_error:
                     print(f"Browser cleanup error: {cleanup_error}")
+    
+    def _print_last_step(self):
+        """Print the most recent trajectory step in a unified format."""
+        # Only print per-step details when GAIA_TRACE=1
+        if os.getenv("GAIA_TRACE", "0") != "1":
+            return
+        try:
+            if not self.agent.trajectory.steps:
+                return
+            step = self.agent.trajectory.steps[-1]
+            thought = step.thought or step.info.get("thought", "") if isinstance(step.info, dict) else ""
+            action_str = ""
+            if isinstance(step.action, dict):
+                if "tool_call" in step.action:
+                    action_str = f"tool_call={step.action.get('tool_call')} args={str(step.action.get('arguments'))[:160]}"
+                else:
+                    action_str = str(step.action)[:200]
+            elif step.action is not None:
+                action_str = str(step.action)[:200]
+            model_preview = (step.model_response or "")[:200]
+            print(f"Thought: {thought or '(none)'}")
+            print(f"Action: {action_str or '(none)'}")
+            if model_preview:
+                print(f"Model: {model_preview}")
+        except Exception:
+            pass
     
     def _extract_final_answer(self, result: Any) -> str:
         """Extract final answer from agent result."""
@@ -133,21 +184,79 @@ class GAIAWorkflow:
             return ""
             
         try:
-            # Build tool spec for direct tool_calls support
-            browser_tools = []
-            if BrowserInput:
-                try:
-                    browser_schema = BrowserInput.model_json_schema()
-                    browser_tools = [{
-                        "type": "function",
-                        "function": {
-                            "name": "browser",
-                            "description": "Local Chromium browser tool for web research",
-                            "parameters": browser_schema,
-                        },
-                    }]
-                except Exception:
-                    pass
+            # Disable step-level debug prints by default; use GAIA_TRACE=1 to enable
+            debug = False
+            # Build tool specs for function-calling directly from the agent's registered tools
+            tool_specs = []
+            try:
+                default_tools = getattr(self.agent.model, "_default_tool_specs", None) or []
+                for tool in default_tools:
+                    # Determine tool name
+                    t_name = getattr(tool, "name", None) or getattr(tool, "tool_name", None) or getattr(tool, "__name__", None)
+                    # Browser tool: prefer authoritative schema
+                    if t_name == "browser" and BrowserInput:
+                        try:
+                            browser_schema = BrowserInput.model_json_schema()
+                            tool_specs.append({
+                                "type": "function",
+                                "function": {
+                                    "name": "browser",
+                                    "description": "Local Chromium browser tool for web research",
+                                    "parameters": browser_schema,
+                                },
+                            })
+                            continue
+                        except Exception:
+                            pass
+                    # Tools exposing .json spec (python/pdf/spreadsheet)
+                    if hasattr(tool, "json"):
+                        try:
+                            tj = tool.json
+                            tool_specs.append({
+                                "type": "function",
+                                "function": {
+                                    "name": tj.get("name") or t_name,
+                                    "description": tj.get("description", ""),
+                                    "parameters": tj.get("parameters", {"type": "object"}),
+                                },
+                            })
+                            continue
+                        except Exception:
+                            pass
+                    # http_request or unknown simple tools: provide a sane default schema
+                    if t_name == "http_request":
+                        tool_specs.append({
+                            "type": "function",
+                            "function": {
+                                "name": "http_request",
+                                "description": "HTTP request tool for fetching web/API resources. Use for JSON APIs or light HTML.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "url": {"type": "string"},
+                                        "method": {"type": "string", "default": "GET"},
+                                        "headers": {"type": "object"},
+                                        "params": {"type": "object"},
+                                        "data": {"type": "object"},
+                                        "timeout": {"type": "integer", "default": 30},
+                                    },
+                                    "required": ["url"],
+                                },
+                            },
+                        })
+                        continue
+                    # Fallback minimal schema
+                    if t_name:
+                        tool_specs.append({
+                            "type": "function",
+                            "function": {
+                                "name": t_name,
+                                "description": getattr(tool, "description", ""),
+                                "parameters": {"type": "object"},
+                            },
+                        })
+            except Exception:
+                pass
             
             # Interactive loop from v2
             history = []
@@ -159,7 +268,7 @@ class GAIAWorkflow:
                 
                 # Try tool_calls path first (if supported)
                 tool_calls_handled = False
-                if browser_tools:
+                if tool_specs:
                     try:
                         enhanced_system_prompt = self.agent.system_prompt
                         chat_messages = [
@@ -169,7 +278,7 @@ class GAIAWorkflow:
                         resp_msg = await self.agent.model.rollout_engine.get_model_response(
                             chat_messages,
                             model=self.agent.model.get_config().get("model_id"),
-                            tools=browser_tools,
+                            tools=tool_specs,
                             tool_choice="auto",
                             return_message_dict=True,
                             **self.agent.model.get_config().get("params", {}),
@@ -187,12 +296,16 @@ class GAIAWorkflow:
                                 if tc_name == "browser":
                                     try:
                                         tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
+                                        if debug:
+                                            print(f"Action: browser tool_call args={str(tc_args)[:200]}")
                                         obs = await self.executor.execute(tc_args)
                                     except Exception as e:
                                         obs = {"error": f"tool_call error: {e}"}
                                     
                                     obs_text = json.dumps(obs, ensure_ascii=False)
                                     history.append(f"Observation: {obs_text[:1600]}")
+                                    if debug:
+                                        print(f"Observation: {obs_text[:1600]}")
                                     tool_calls_handled = True
                                     
                                     self.agent._finish_current_step(
@@ -201,16 +314,54 @@ class GAIAWorkflow:
                                         done=False
                                     )
                                     
+                                elif tc_name in ("http_request", "file_read", "calculator", "python_repl"):
+                                    try:
+                                        tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
+                                        if debug:
+                                            print(f"Action: {tc_name} tool_call args={str(tc_args)[:200]}")
+                                        # Dispatch to the appropriate tool
+                                        if tc_name == "http_request":
+                                            result = http_request(tc_args)
+                                            obs = await result if asyncio.iscoroutine(result) else result
+                                        elif tc_name == "file_read":
+                                            result = file_read(tc_args)
+                                            obs = await result if asyncio.iscoroutine(result) else result
+                                        elif tc_name == "calculator":
+                                            result = calculator(tc_args)
+                                            obs = await result if asyncio.iscoroutine(result) else result
+                                        elif tc_name == "python_repl":
+                                            result = python_repl(tc_args)
+                                            obs = await result if asyncio.iscoroutine(result) else result
+                                        else:
+                                            obs = {"error": f"unknown tool: {tc_name}"}
+                                    except Exception as e:
+                                        obs = {"error": f"tool_call error: {e}"}
+                                    obs_text = json.dumps(obs, ensure_ascii=False)
+                                    history.append(f"Observation: {obs_text[:1600]}")
+                                    if debug:
+                                        print(f"Observation: {obs_text[:1600]}")
+                                    tool_calls_handled = True
+
+                                    self.agent._finish_current_step(
+                                        model_response=model_response_content + f" [tool_call:{tc_name}]",
+                                        action={"tool_call": tc_name, "arguments": tc_args},
+                                        done=False,
+                                    )
+                                    self._print_last_step()
+
                                 elif tc_name == "final_answer":
                                     try:
                                         tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
                                         answer = str(tc_args.get("answer", "")).strip()
+                                        if debug:
+                                            print(f"Action: final_answer answer={answer}")
                                         
                                         self.agent._finish_current_step(
                                             model_response=model_response_content + f" [tool_call:{tc_name}]",
                                             action={"tool_call": tc_name, "arguments": tc_args},
                                             done=True
                                         )
+                                        self._print_last_step()
                                         return answer
                                     except Exception:
                                         pass
@@ -225,6 +376,8 @@ class GAIAWorkflow:
                 text = str(resp) if resp is not None else ""
                 action, thought = parse_action(text)
                 history.append(f"Thought: {thought or '(missing)'}")
+                if debug:
+                    print(f"Thought: {thought or '(missing)'}")
                 
                 try:
                     if thought:
@@ -236,25 +389,74 @@ class GAIAWorkflow:
                     
                 if not action or "name" not in action:
                     history.append("Observation: (parse_error) Output exactly two lines: Thought + Action JSON (browser/final_answer)")
+                    if debug:
+                        print("Observation: (parse_error) Output exactly two lines: Thought + Action JSON (browser/final_answer)")
                     continue
                     
                 name = str(action.get("name", "")).strip()
                 args = action.get("arguments", {}) or {}
+                if debug:
+                    try:
+                        print(f"Action: {name} args={json.dumps(args)[:200]}")
+                    except Exception:
+                        print(f"Action: {name}")
                 
                 if name == "final_answer":
                     answer = str(args.get("answer", "")).strip()
+                    if debug:
+                        print(f"Action: final_answer answer={answer}")
+                    # Log a step for the decision to answer
+                    try:
+                        self.agent._start_new_step(observation=user)
+                        if getattr(self.agent, "_current_step", None) is not None:
+                            self.agent._current_step.thought = thought or ""
+                        self.agent._finish_current_step(
+                            model_response="",
+                            action={"tool_call": "final_answer", "arguments": {"answer": answer}},
+                            done=True,
+                        )
+                        self._print_last_step()
+                    except Exception:
+                        pass
                     return answer
                     
                 try:
                     if name == "browser":
                         obs = await self.executor.execute(args)
+                    elif name == "http_request":
+                        result = http_request(args)
+                        obs = await result if asyncio.iscoroutine(result) else result
+                    elif name == "file_read":
+                        result = file_read(args)
+                        obs = await result if asyncio.iscoroutine(result) else result
+                    elif name == "calculator":
+                        result = calculator(args)
+                        obs = await result if asyncio.iscoroutine(result) else result
+                    elif name == "python_repl":
+                        result = python_repl(args)
+                        obs = await result if asyncio.iscoroutine(result) else result
                     else:
-                        obs = {"error": f"unknown action: {name}. Only 'browser' or 'final_answer' are allowed."}
+                        obs = {"error": f"unknown action: {name}. Allowed: browser, http_request, file_read, calculator, python_repl, final_answer."}
                 except Exception as e:
                     obs = {"error": f"tool error: {e}"}
                     
                 obs_text = json.dumps(obs, ensure_ascii=False)
                 history.append(f"Observation: {obs_text[:1600]}")
+                if debug:
+                    print(f"Observation: {obs_text[:1600]}")
+                # Record the tool execution as a step in trajectory
+                try:
+                    self.agent._start_new_step(observation=user)
+                    if getattr(self.agent, "_current_step", None) is not None:
+                        self.agent._current_step.thought = thought or ""
+                    self.agent._finish_current_step(
+                        model_response="",
+                        action={"tool_call": name, "arguments": args},
+                        done=False,
+                    )
+                    self._print_last_step()
+                except Exception:
+                    pass
                 
             return ""  # No final answer found
             
@@ -335,7 +537,7 @@ async def evaluate_gaia(
         print(f"\nProgress: {i+1}/{total}")
         result = await workflow.run_single_task(task)
         results.append(result)
-        
+        print()
         if result.get("is_correct", False):
             correct += 1
             print(f"✅ Correct ({correct}/{i+1})")

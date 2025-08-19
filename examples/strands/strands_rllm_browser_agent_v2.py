@@ -5,46 +5,9 @@ from typing import Any, Dict, Optional, Tuple
 import re
 
 from dotenv import load_dotenv, find_dotenv
-from rllm.engine.rollout_engine import RolloutEngine
-from rllm.integrations.strands import RLLMModel, StrandsAgent
-from strands_tools.browser import LocalChromiumBrowser
+from agent_factory import create_browser_agent, parse_action, parse_schema, USER_TEMPLATE, BrowserInput
 from pydantic import ValidationError
-try:
-    from strands_tools.browser.models import BrowserInput
-except ImportError:
-    BrowserInput = None
 
-
-SYSTEM_PROMPT = """
-You are a web research agent using a 'browser' tool. Follow the MANDATORY workflow to avoid loops.
-
-MANDATORY WORKFLOW (must follow in order):
-1. navigate to search page → get_text to read results → navigate to promising result → get_text to extract content
-2. If no useful content found: try different search terms or sources
-3. Once you have sufficient info: final_answer
-
-Planning & State (in Thought line):
-- First declare Schema=[field1, field2, ...] (compact, task-specific; agent-defined).
-- State focus_dim=<time|geo|definition|number> and brief reasoning (<80 tokens).
-- Always mention your current workflow step (navigate/get_text/analyze/conclude).
-
-Tooling:
-- Use ONLY the 'browser' tool with actions from the manifest.
-- NEVER repeat the same navigate action - always follow with get_text!
-- To search: navigate to "https://duckduckgo.com/html/?q==your+search+terms"
-- After navigate: MUST use get_text with selector (required parameter)
-- Safe selectors: "body" (full page), "main", "[data-testid]", "h1,h2,h3", "p"
-- Example: {"type":"get_text","selector":"body"} - reads full page text
-- If selector times out, try simpler ones: "body" > "main" > "p" > get_html
-- For extraction: use evaluate with JSON matching your Schema
-- If stuck in loops: change search terms or conclude with available info
-
-STRICT OUTPUT (2 lines only):
-Thought: <Schema=[...]; workflow_step=navigate/get_text/conclude; reasoning>
-Action: {"name":"browser","arguments":{"action":{"type":"<action>", ...}}}
-OR
-Action: {"name":"final_answer","arguments":{"answer":"..."}}
-"""
 
 USER_TEMPLATE = """Question: {question}
 History: {history}
@@ -56,54 +19,6 @@ Action: [JSON]"""
 
 ACTION_RE = re.compile("Action:\s*(\{.*\})", re.DOTALL | re.IGNORECASE)
 SCHEMA_RE = re.compile("Schema\s*:\s*(\[[^\]]*\])", re.IGNORECASE)
-
-def parse_schema(text: str) -> Optional[list]:
-    m = SCHEMA_RE.search(text or "")
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(1))
-    except Exception:
-        raw = m.group(1).strip("[] ")
-        if not raw:
-            return None
-        return [x.strip() for x in raw.split(",") if x.strip()]
-
-
-
-def parse_action(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    thought = ""
-    m_thought = re.search(r"Thought:(.*?)(?:\nAction:|$)", text, re.DOTALL | re.IGNORECASE)
-    if m_thought:
-        thought = m_thought.group(1).strip()
-    m = ACTION_RE.search(text.strip())
-    if not m:
-        return None, thought
-    try:
-        return json.loads(m.group(1)), thought
-    except Exception:
-        return None, thought
-
-
-def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Fill required fields for known browser actions when missing (safe defaults)."""
-    action = args.get("action", {})
-    if not isinstance(action, dict):
-        return {"action": {}}
-    t = action.get("type")
-    if t == "init_session":
-        action.setdefault("session_name", "main-session")
-        action.setdefault("description", "Web research session")
-    # Remove automatic session_name injection - let the browser tool handle it
-    return {"action": action}
-
-# fallback allowlist for strands browser action types (snake_case)
-ALLOWED_BROWSER_TYPES_FALLBACK = {
-    "init_session","list_local_sessions","navigate","click","type","evaluate",
-    "press_key","get_text","get_html","screenshot","refresh","back","forward",
-    "new_tab","switch_tab","close_tab","list_tabs","get_cookies","set_cookies",
-    "network_intercept","execute_cdp","close"
-}
 
 # Prefer authoritative actions from Strands Pydantic models when available
 def get_browser_actions_from_models() -> list[str]:
@@ -212,41 +127,9 @@ class BrowserExecutor:
 
 async def main():
     load_dotenv(find_dotenv())
-    from transformers import AutoTokenizer
-    tokenizer_model = os.getenv("TOKENIZER_MODEL", "Qwen/Qwen3-4B")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
-    
-    together_api_key = os.getenv("TOGETHER_AI_API_KEY")
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    
-    if together_api_key:
-        openai_kwargs = {"api_key": together_api_key, "base_url": "https://api.together.xyz/v1"}
-        model_id = os.getenv("TOGETHER_AI_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-Turbo")
-    elif openai_api_key:
-        openai_kwargs = {"api_key": openai_api_key}
-        if os.getenv("OPENAI_BASE_URL"):
-            openai_kwargs["base_url"] = os.getenv("OPENAI_BASE_URL")
-        model_id = os.getenv("MODEL_NAME", "gpt-4o")
-    else:
-        raise ValueError("API key required")
-    
-    rollout_engine = RolloutEngine(engine_name="openai", tokenizer=tokenizer, openai_kwargs=openai_kwargs)
-    
-    max_tokens = 1000
-    temperature = 0.2
-        
-    model = RLLMModel(rollout_engine=rollout_engine, model_id=model_id, max_tokens=max_tokens, temperature=temperature)
-
-    headless = os.getenv("BROWSER_HEADLESS", "true").lower() in ("1", "true", "yes")
-    try:
-        browser = LocalChromiumBrowser(headless=headless)
-    except TypeError:
-        browser = LocalChromiumBrowser()
-
-    # Create enhanced executor and system prompt with dynamic action list
-    executor = BrowserExecutor(browser.browser)
-    enhanced_system_prompt = SYSTEM_PROMPT + "\nAllowed Browser Action Types: " + ", ".join(executor.allowed)
-    agent = StrandsAgent(model=model, system_prompt=enhanced_system_prompt, tools=[browser.browser])
+    # Use shared factory and prompts
+    agent, browser, executor = create_browser_agent()
+    enhanced_system_prompt = agent.system_prompt or ""
     
     # Display authoritative action list from Strands models (for user visibility only)
     try:
@@ -258,7 +141,8 @@ async def main():
         "QUESTION",
         # "There was an early Christian poetic hymn composed by a late antique writer who passed away around the mid-5th century. The year of this writer's death coincides with the last year of a scientific chronology that reconstructs environmental conditions from several centuries before the modern era. What is the name of this chronology?",
         # "Ap musical piece closely associated with a prominent South American capital features lyrics written by a notable figure who was later recognized with a distinguished local civic honor in the early 21st century. The composition's melody was created by a musician who received formal training at a respected arts institution in western Colombia. What is the name of this musical piece?",
-        "加州最古老的poker room是哪家？"
+        # "加州最古老的poker room是哪家？",
+        "A paper about AI regulation that was originally submitted to arXiv.org in June 2022 shows a figure with three axes, where each axis has a label word at both ends. Which of these words is used to describe a type of society in a Physics and Society article submitted to arXiv.org on August 11, 2016?",
     )
 
     print("=== Strands Browser Research (minimal) ===")
@@ -306,7 +190,7 @@ async def main():
         # RL-integrated loop: try tool_calls first, fall back to text parsing
         history: list[str] = []
         current_schema: Optional[list] = None
-        max_steps = 10 if not together_api_key else int(os.getenv("MAX_STEPS", "30"))
+        max_steps = int(os.getenv("MAX_STEPS", "30"))
         for step in range(1, max_steps + 1):
             print(f"[step {step}] Building prompt", flush=True)
             schema_hint = f"Current Schema: {json.dumps(current_schema)}" if current_schema else ""
@@ -440,7 +324,7 @@ async def main():
         try:
             if hasattr(browser, 'browser') and callable(getattr(browser, 'browser')):
                 # Use the browser method with close action
-                close_action = {"action": {"type": "close"}}
+                close_action = {"action": {"type": "close", "session_name": "main-session"}}
                 browser.browser(close_action)
             elif hasattr(browser, 'quit'):
                 browser.quit()

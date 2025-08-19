@@ -8,6 +8,10 @@ from dotenv import load_dotenv, find_dotenv
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.integrations.strands import RLLMModel, StrandsAgent
 from strands_tools.browser import LocalChromiumBrowser
+from strands_tools.http_request import http_request
+from strands_tools.file_read import file_read
+from strands_tools.calculator import calculator
+from strands_tools.python_repl import python_repl
 from pydantic import ValidationError
 try:
     from strands_tools.browser.models import BrowserInput
@@ -16,34 +20,28 @@ except ImportError:
 
 
 SYSTEM_PROMPT = """
-You are a web research agent using a 'browser' tool. Follow the MANDATORY workflow to avoid loops.
+You are a research agent. Always ground answers in tool-based evidence. Do not guess.
 
-MANDATORY WORKFLOW (must follow in order):
-1. navigate to search page → get_text to read results → navigate to promising result → get_text to extract content
-2. If no useful content found: try different search terms or sources
-3. Once you have sufficient info: final_answer
+Global loop (repeat until confident):
+1) Thought: declare Schema=[minimal fields], focus_dim=<time|geo|definition|number>, and ToolPlan (which tool and why).
+2) Action: execute the best tool for the step. Prefer tool_calls if available. Otherwise, output the strict 2-line format.
 
-Planning & State (in Thought line):
-- First declare Schema=[field1, field2, ...] (compact, task-specific; agent-defined).
-- State focus_dim=<time|geo|definition|number> and brief reasoning (<80 tokens).
-- Always mention your current workflow step (navigate/get_text/analyze/conclude).
+Tool selection rules:
+- browser: general navigation and reading.
+  - First action: init_session with a kebab-case session_name (e.g., "research-1"); reuse it.
+  - After navigate: usually read with get_text  (e.g., selectors "body", "main", "h1,h2,h3", "p"), if you need to interact, use click items or type things. Avoid looping the same read on a page.
+  - If you are stucked by Captcha, use https://duckduckgo.com to do the search instead.
+- http_request: prefer for structured/fast sources (GitHub/Wikipedia/USGS APIs or light HTML).
+- file_read: open local/remote files (PDF/CSV/text). For PDFs, extract essential text snippets.
+- calculator: arithmetic/unit conversions; for complex code use python_repl.
 
-Tooling:
-- Use ONLY the 'browser' tool with actions from the manifest.
-- NEVER repeat the same navigate action - always follow with get_text!
-- To search: navigate to "https://duckduckgo.com/html/?q==your+search+terms"
-- After navigate: MUST use get_text with selector (required parameter)
-- Safe selectors: "body" (full page), "main", "[data-testid]", "h1,h2,h3", "p"
-- Example: {"type":"get_text","selector":"body"} - reads full page text
-- If selector times out, try simpler ones: "body" > "main" > "p" > get_html
-- For extraction: use evaluate with JSON matching your Schema
-- If stuck in loops: change search terms or conclude with available info
+Answer policy:
+- Only output final_answer after at least one Observation supports it (prefer two). Keep answers concise.
+- If the current approach fails twice, change strategy (different query/tool) rather than repeating the same navigate/get_text.
 
-STRICT OUTPUT (2 lines only):
-Thought: <Schema=[...]; workflow_step=navigate/get_text/conclude; reasoning>
-Action: {"name":"browser","arguments":{"action":{"type":"<action>", ...}}}
-OR
-Action: {"name":"final_answer","arguments":{"answer":"..."}}
+STRICT OUTPUT (non-tool_call mode; EXACTLY two lines per step):
+Thought: <Schema=[...]; focus_dim=...; ToolPlan=...; reasoning>
+Action: {"name":"browser|http_request|file_read|calculator|python_repl|final_answer","arguments":{...}}
 """
 
 USER_TEMPLATE = """Question: {question}
@@ -93,6 +91,8 @@ def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
     if t == "init_session":
         action.setdefault("session_name", "main-session")
         action.setdefault("description", "Web research session")
+    if t == "close":
+        action.setdefault("session_name", "main-session")
     # Remove automatic session_name injection - let the browser tool handle it
     return {"action": action}
 
@@ -226,7 +226,16 @@ def create_browser_agent():
 
     # Create enhanced executor and system prompt with dynamic action list
     executor = BrowserExecutor(browser.browser)
-    enhanced_system_prompt = SYSTEM_PROMPT + "\nAllowed Browser Action Types: " + ", ".join(executor.allowed)
-    agent = StrandsAgent(model=model, system_prompt=enhanced_system_prompt, tools=[browser.browser])
+    enhanced_system_prompt = (
+        SYSTEM_PROMPT
+        + "\nAllowed Browser Action Types: "
+        + ", ".join(executor.allowed)
+        + "\nAvailable Utility Tools: http_request, file_read, calculator, python_repl"
+    )
+    agent = StrandsAgent(
+        model=model,
+        system_prompt=enhanced_system_prompt,
+        tools=[browser.browser, http_request, file_read, calculator, python_repl],
+    )
     
     return agent, browser, executor
