@@ -15,10 +15,7 @@ from rllm.data.utils import load_dataset
 from rllm.data.dataset_types import TestDataset
 from rllm.integrations.strands import StrandsAgent
 from agent_factory import create_browser_agent, parse_action, parse_schema, USER_TEMPLATE, BrowserInput
-from strands_tools.http_request import http_request
-from strands_tools.file_read import file_read
-from strands_tools.calculator import calculator
-from strands_tools.python_repl import python_repl
+from strands_tools import http_request, file_read, calculator, python_repl
 
 
 class GAIAWorkflow:
@@ -186,77 +183,12 @@ class GAIAWorkflow:
         try:
             # Disable step-level debug prints by default; use GAIA_TRACE=1 to enable
             debug = False
-            # Build tool specs for function-calling directly from the agent's registered tools
-            tool_specs = []
+            # Build unified tool specs (shared with v2)
             try:
-                default_tools = getattr(self.agent.model, "_default_tool_specs", None) or []
-                for tool in default_tools:
-                    # Determine tool name
-                    t_name = getattr(tool, "name", None) or getattr(tool, "tool_name", None) or getattr(tool, "__name__", None)
-                    # Browser tool: prefer authoritative schema
-                    if t_name == "browser" and BrowserInput:
-                        try:
-                            browser_schema = BrowserInput.model_json_schema()
-                            tool_specs.append({
-                                "type": "function",
-                                "function": {
-                                    "name": "browser",
-                                    "description": "Local Chromium browser tool for web research",
-                                    "parameters": browser_schema,
-                                },
-                            })
-                            continue
-                        except Exception:
-                            pass
-                    # Tools exposing .json spec (python/pdf/spreadsheet)
-                    if hasattr(tool, "json"):
-                        try:
-                            tj = tool.json
-                            tool_specs.append({
-                                "type": "function",
-                                "function": {
-                                    "name": tj.get("name") or t_name,
-                                    "description": tj.get("description", ""),
-                                    "parameters": tj.get("parameters", {"type": "object"}),
-                                },
-                            })
-                            continue
-                        except Exception:
-                            pass
-                    # http_request or unknown simple tools: provide a sane default schema
-                    if t_name == "http_request":
-                        tool_specs.append({
-                            "type": "function",
-                            "function": {
-                                "name": "http_request",
-                                "description": "HTTP request tool for fetching web/API resources. Use for JSON APIs or light HTML.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "url": {"type": "string"},
-                                        "method": {"type": "string", "default": "GET"},
-                                        "headers": {"type": "object"},
-                                        "params": {"type": "object"},
-                                        "data": {"type": "object"},
-                                        "timeout": {"type": "integer", "default": 30},
-                                    },
-                                    "required": ["url"],
-                                },
-                            },
-                        })
-                        continue
-                    # Fallback minimal schema
-                    if t_name:
-                        tool_specs.append({
-                            "type": "function",
-                            "function": {
-                                "name": t_name,
-                                "description": getattr(tool, "description", ""),
-                                "parameters": {"type": "object"},
-                            },
-                        })
+                from agent_factory import build_llm_tool_specs
+                tool_specs = build_llm_tool_specs()
             except Exception:
-                pass
+                tool_specs = []
             
             # Interactive loop from v2
             history = []
@@ -265,109 +197,17 @@ class GAIAWorkflow:
             for step in range(1, max_steps + 1):
                 schema_hint = f"Current Schema: {json.dumps(current_schema)}" if current_schema else ""
                 user = USER_TEMPLATE.format(question=question, history="".join(history), schema_hint=schema_hint)
-                
+                print("user: ", user)
                 # Try tool_calls path first (if supported)
                 tool_calls_handled = False
                 if tool_specs:
                     try:
-                        enhanced_system_prompt = self.agent.system_prompt
-                        chat_messages = [
-                            {"role": "system", "content": enhanced_system_prompt},
-                            {"role": "user", "content": user},
-                        ]
-                        resp_msg = await self.agent.model.rollout_engine.get_model_response(
-                            chat_messages,
-                            model=self.agent.model.get_config().get("model_id"),
-                            tools=tool_specs,
-                            tool_choice="auto",
-                            return_message_dict=True,
-                            **self.agent.model.get_config().get("params", {}),
-                        )
-                        
-                        tool_calls = resp_msg.get("tool_calls") if isinstance(resp_msg, dict) else None
-                        if tool_calls:
-                            self.agent._start_new_step(observation=user)
-                            model_response_content = resp_msg.get("content", "")
-                            
-                            for tc in tool_calls:
-                                tc_name = tc.get("name")
-                                tc_args_str = tc.get("arguments", "")
-                                
-                                if tc_name == "browser":
-                                    try:
-                                        tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                                        if debug:
-                                            print(f"Action: browser tool_call args={str(tc_args)[:200]}")
-                                        obs = await self.executor.execute(tc_args)
-                                    except Exception as e:
-                                        obs = {"error": f"tool_call error: {e}"}
-                                    
-                                    obs_text = json.dumps(obs, ensure_ascii=False)
-                                    history.append(f"Observation: {obs_text[:1600]}")
-                                    if debug:
-                                        print(f"Observation: {obs_text[:1600]}")
-                                    tool_calls_handled = True
-                                    
-                                    self.agent._finish_current_step(
-                                        model_response=model_response_content + f" [tool_call:{tc_name}]",
-                                        action={"tool_call": tc_name, "arguments": tc_args},
-                                        done=False
-                                    )
-                                    
-                                elif tc_name in ("http_request", "file_read", "calculator", "python_repl"):
-                                    try:
-                                        tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                                        if debug:
-                                            print(f"Action: {tc_name} tool_call args={str(tc_args)[:200]}")
-                                        # Dispatch to the appropriate tool
-                                        if tc_name == "http_request":
-                                            result = http_request(tc_args)
-                                            obs = await result if asyncio.iscoroutine(result) else result
-                                        elif tc_name == "file_read":
-                                            result = file_read(tc_args)
-                                            obs = await result if asyncio.iscoroutine(result) else result
-                                        elif tc_name == "calculator":
-                                            result = calculator(tc_args)
-                                            obs = await result if asyncio.iscoroutine(result) else result
-                                        elif tc_name == "python_repl":
-                                            result = python_repl(tc_args)
-                                            obs = await result if asyncio.iscoroutine(result) else result
-                                        else:
-                                            obs = {"error": f"unknown tool: {tc_name}"}
-                                    except Exception as e:
-                                        obs = {"error": f"tool_call error: {e}"}
-                                    obs_text = json.dumps(obs, ensure_ascii=False)
-                                    history.append(f"Observation: {obs_text[:1600]}")
-                                    if debug:
-                                        print(f"Observation: {obs_text[:1600]}")
-                                    tool_calls_handled = True
-
-                                    self.agent._finish_current_step(
-                                        model_response=model_response_content + f" [tool_call:{tc_name}]",
-                                        action={"tool_call": tc_name, "arguments": tc_args},
-                                        done=False,
-                                    )
-                                    self._print_last_step()
-
-                                elif tc_name == "final_answer":
-                                    try:
-                                        tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                                        answer = str(tc_args.get("answer", "")).strip()
-                                        if debug:
-                                            print(f"Action: final_answer answer={answer}")
-                                        
-                                        self.agent._finish_current_step(
-                                            model_response=model_response_content + f" [tool_call:{tc_name}]",
-                                            action={"tool_call": tc_name, "arguments": tc_args},
-                                            done=True
-                                        )
-                                        self._print_last_step()
-                                        return answer
-                                    except Exception:
-                                        pass
-                            
-                            if tool_calls_handled:
-                                continue
+                        # Unified path via Strands invoke (tools auto-passed)
+                        resp = await self.agent.invoke_async(user, tool_specs=tool_specs)
+                        text = str(resp) if resp is not None else ""
+                        if debug:
+                            preview = text.replace("\n", " ")[:200] if text else "(empty)"
+                            print(f"invoke output: {preview}{'...' if len(text) > 200 else ''}")
                     except Exception:
                         pass
                 

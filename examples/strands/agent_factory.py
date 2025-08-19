@@ -8,10 +8,7 @@ from dotenv import load_dotenv, find_dotenv
 from rllm.engine.rollout_engine import RolloutEngine
 from rllm.integrations.strands import RLLMModel, StrandsAgent
 from strands_tools.browser import LocalChromiumBrowser
-from strands_tools.http_request import http_request
-from strands_tools.file_read import file_read
-from strands_tools.calculator import calculator
-from strands_tools.python_repl import python_repl
+from strands_tools import http_request, file_read, calculator, python_repl
 from pydantic import ValidationError
 try:
     from strands_tools.browser.models import BrowserInput
@@ -81,6 +78,118 @@ def parse_action(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     except Exception:
         return None, thought
 
+
+def build_llm_tool_specs() -> list[dict[str, Any]]:
+    """Build a unified set of OpenAI-style tool specs for function calling.
+
+    Includes: browser, http_request, file_read, calculator, python_repl, final_answer.
+    Falls back gracefully if BrowserInput is unavailable.
+    """
+    specs: list[dict[str, Any]] = []
+
+    # Browser tool with authoritative schema when available
+    try:
+        if BrowserInput:
+            try:
+                browser_schema = BrowserInput.model_json_schema()
+            except Exception:
+                browser_schema = {"type": "object", "properties": {"action": {"type": "object"}}}
+        else:
+            browser_schema = {"type": "object", "properties": {"action": {"type": "object"}}}
+
+        specs.append({
+            "type": "function",
+            "function": {
+                "name": "browser",
+                "description": "Local Chromium browser tool for web research",
+                "parameters": browser_schema,
+            },
+        })
+    except Exception:
+        pass
+
+    # http_request schema (minimal, robust)
+    specs.append({
+        "type": "function",
+        "function": {
+            "name": "http_request",
+            "description": "Make an HTTP request (JSON preferred).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]},
+                    "url": {"type": "string"},
+                    "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                    "params": {"type": "object", "additionalProperties": True},
+                    "data": {"type": "string"},
+                    "json": {"type": "object"},
+                    "timeout": {"type": "number"}
+                },
+                "required": ["method", "url"],
+            },
+        },
+    })
+
+    # file_read schema (local/remote)
+    specs.append({
+        "type": "function",
+        "function": {
+            "name": "file_read",
+            "description": "Read local or remote files (PDF/CSV/text).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "url": {"type": "string"},
+                    "selector": {"type": "string"}
+                }
+            },
+        },
+    })
+
+    # calculator schema
+    specs.append({
+        "type": "function",
+        "function": {
+            "name": "calculator",
+            "description": "Evaluate arithmetic expressions and unit conversions.",
+            "parameters": {
+                "type": "object",
+                "properties": {"expression": {"type": "string"}},
+                "required": ["expression"],
+            },
+        },
+    })
+
+    # python_repl schema
+    specs.append({
+        "type": "function",
+        "function": {
+            "name": "python_repl",
+            "description": "Execute short Python snippets for complex logic.",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+            },
+        },
+    })
+
+    # final_answer schema (critical for stable conclusion)
+    specs.append({
+        "type": "function",
+        "function": {
+            "name": "final_answer",
+            "description": "Submit the final answer and end the task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+            },
+        },
+    })
+
+    return specs
 
 def normalize_browser_args(args: Dict[str, Any]) -> Dict[str, Any]:
     """Fill required fields for known browser actions when missing (safe defaults)."""

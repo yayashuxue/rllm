@@ -200,3 +200,5 @@ CLAUDE.md
 examples/strands/CLAUDE.md
 examples/strands/IMPLEMENTATION_PLAN.md
 examples/strands/TODO.md
+gaia_evaluation_results.json
+gaia_workflow_results.json

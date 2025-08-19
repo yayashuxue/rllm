@@ -147,7 +147,11 @@ async def main():
 
     print("=== Strands Browser Research (minimal) ===")
     print(f"Model: {agent.model.get_config().get('model_id')}")
-    print("Tools: ['browser']")
+    try:
+        tool_names = [getattr(t, 'name', None) or getattr(t, 'tool_name', None) or getattr(t, '__name__', 'tool') for t in (agent.model._default_tool_specs or [])]
+        print(f"Tools: {tool_names}")
+    except Exception:
+        print("Tools: (unknown)")
     print("Question:")
     print(question)
 
@@ -170,22 +174,12 @@ async def main():
             print(f"\n--- Browser init skipped: {e} ---")
             # Continue without session management if not supported
 
-        # Build tool spec for direct tool_calls support
-        browser_tools = []
-        if BrowserInput:
-            try:
-                browser_schema = BrowserInput.model_json_schema()
-                browser_tools = [{
-                    "type": "function",
-                    "function": {
-                        "name": "browser",
-                        "description": "Local Chromium browser tool for web research",
-                        "parameters": browser_schema,
-                    },
-                }]
-            except Exception as e:
-                browser_schema = {"type": "object", "properties": {}}
-        # Note: BrowserInput available, tool_calls support enabled
+        # Build unified tool specs for direct tool_calls support
+        try:
+            from agent_factory import build_llm_tool_specs  # reuse unified spec
+            browser_tools = build_llm_tool_specs()
+        except Exception:
+            browser_tools = []
 
         # RL-integrated loop: try tool_calls first, fall back to text parsing
         history: list[str] = []
@@ -196,84 +190,8 @@ async def main():
             schema_hint = f"Current Schema: {json.dumps(current_schema)}" if current_schema else ""
             user = USER_TEMPLATE.format(question=question, history="".join(history), schema_hint=schema_hint)
             
-            # Try tool_calls path first (if supported)
-            tool_calls_handled = False
-            model_id = agent.model.get_config().get('model_id', '')
-            if browser_tools:
-                try:
-                    print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (prefer tool_calls)...", flush=True)
-                    # Direct call to rollout engine to get structured response
-                    chat_messages = [
-                        {"role": "system", "content": enhanced_system_prompt},
-                        {"role": "user", "content": user},
-                    ]
-                    resp_msg = await agent.model.rollout_engine.get_model_response(
-                        chat_messages,
-                        model=agent.model.get_config().get("model_id"),
-                        tools=browser_tools,
-                        tool_choice="auto",
-                        return_message_dict=True,
-                        **agent.model.get_config().get("params", {}),
-                    )
-                    
-                    # Check if we got tool_calls
-                    tool_calls = resp_msg.get("tool_calls") if isinstance(resp_msg, dict) else None
-                    if tool_calls:
-                        print(f"[step {step}] tool_calls received: {len(tool_calls)}", flush=True)
-                        
-                        # CRITICAL: Record RL step data for tool_calls path
-                        agent._start_new_step(observation=user)
-                        model_response_content = resp_msg.get("content", "")
-                        
-                        for tc in tool_calls:
-                            tc_name = tc.get("name")
-                            tc_args_str = tc.get("arguments", "")
-                            print(f"[step {step}] Executing tool_call: {tc_name} args={tc_args_str[:200]}", flush=True)
-                            
-                            if tc_name == "browser":
-                                try:
-                                    tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                                    obs = await executor.execute(tc_args)
-                                except Exception as e:
-                                    obs = {"error": f"tool_call error: {e}"}
-                                
-                                obs_text = json.dumps(obs, ensure_ascii=False)
-                                print(f"[step {step}] Observation (tool_call): {obs_text[:1600]}", flush=True)
-                                history.append(f"Observation: {obs_text[:1600]}")
-                                tool_calls_handled = True
-                                
-                                # Record RL step completion with tool_call action
-                                agent._finish_current_step(
-                                    model_response=model_response_content + f" [tool_call:{tc_name}]",
-                                    action={"tool_call": tc_name, "arguments": tc_args},
-                                    done=False
-                                )
-                                
-                            elif tc_name == "final_answer":
-                                try:
-                                    tc_args = json.loads(tc_args_str) if isinstance(tc_args_str, str) else tc_args_str
-                                    answer = str(tc_args.get("answer", "")).strip()
-                                    print(f"[step {step}] Final answer via tool_call", flush=True)
-                                    print("\n=== Final Answer ===")
-                                    print(answer)
-                                    
-                                    # Record RL step completion for final answer
-                                    agent._finish_current_step(
-                                        model_response=model_response_content + f" [tool_call:{tc_name}]",
-                                        action={"tool_call": tc_name, "arguments": tc_args},
-                                        done=True
-                                    )
-                                    return
-                                except Exception as e:
-                                    print(f"[step {step}] Error parsing final_answer tool_call: {e}", flush=True)
-                        
-                        if tool_calls_handled:
-                            continue  # Skip to next step
-                except Exception as e:
-                    print(f"[step {step}] Tool_calls attempt failed: {e}", flush=True)
-            
-            # Fallback to text parsing (always goes through StrandsAgent for RL tracking)
-            print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (text fallback)...", flush=True)
+            # Single path: let Strands handle tool calls natively (tools were registered in agent)
+            print(f"[step {step}] Querying model {agent.model.get_config().get('model_id')} (native tools)...", flush=True)
             resp = await agent.invoke_async(user)
             text = str(resp) if resp is not None else ""
             preview = text.replace("\n", " ")[:200] if text else "(empty)"
