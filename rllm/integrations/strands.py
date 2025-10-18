@@ -244,7 +244,10 @@ class RLLMModel(Model):
     def _extract_tool_call_info(self, tool_call) -> dict:
         """Extract tool call information from ModelOutput tool call."""
         try:
-            func = tool_call.get("function", {}) if isinstance(tool_call, dict) else getattr(tool_call, "function", {})
+            try:
+                func = tool_call.get("function", {}) if isinstance(tool_call, dict) else getattr(tool_call, "function", {})
+            except Exception:
+                func = tool_call
             fname = func.get("name") if isinstance(func, dict) else getattr(func, "name", None)
             fargs_raw = func.get("arguments") if isinstance(func, dict) else getattr(func, "arguments", None)
 

@@ -346,8 +346,8 @@ class RLLMOpenAIModel(SmolModel):
 
             # Extract text and token usage from ModelOutput
             response_text = model_output.text
-            completion_tokens = model_output.completion_tokens
-            prompt_tokens = model_output.prompt_tokens
+            completion_tokens = model_output.completion_length
+            prompt_tokens = model_output.prompt_length
 
             # Create a ChatMessage-like response object
             if SMOLAGENTS_AVAILABLE:

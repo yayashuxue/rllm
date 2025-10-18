@@ -15,6 +15,7 @@ ENV_CLASSES = {
     "code": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
     "swe": safe_import("rllm.environments.swe.swe", "SWEEnv"),
     "competition_coding": safe_import("rllm.environments.code.competition_coding", "CompetitionCodingEnv"),
+    "single_turn_env": safe_import("rllm.environments.base.single_turn_env", "SingleTurnEnvironment"),
 }
 
 # Import agent classes
@@ -30,6 +31,8 @@ AGENT_CLASSES = {
 WORKFLOW_CLASSES = {
     "single_turn_workflow": safe_import("rllm.workflows.single_turn_workflow", "SingleTurnWorkflow"),
     "multi_turn_workflow": safe_import("rllm.workflows.multi_turn_workflow", "MultiTurnWorkflow"),
+    "simple_workflow": safe_import("rllm.workflows.simple_workflow", "SimpleWorkflow"),
+    "cumulative_workflow": safe_import("rllm.workflows.cumulative_workflow", "CumulativeWorkflow"),
 }
 
 # Filter out None values for unavailable imports

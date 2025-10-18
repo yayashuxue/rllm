@@ -96,17 +96,17 @@ if __name__ == "__main__":
     rollout_engine = OpenAIEngine(
         model=model_name,
         tokenizer=tokenizer,
+        max_prompt_length=2048,
+        max_response_length=1024,
         base_url="http://localhost:30000/v1",
         api_key="None",
-        sampling_params={"temperature": 0.6, "top_p": 0.95, "max_tokens": 1024},
+        sampling_params={"temperature": 0.6, "top_p": 0.95},
     )
 
     engine = AgentWorkflowEngine(
         workflow_cls=SolverJudgeWorkflow,
         workflow_args={
             "n_solutions": n_solutions,
-            "max_prompt_length": 2048,
-            "max_response_length": 1024,
             "reward_function": countdown_reward_fn,
         },
         rollout_engine=rollout_engine,

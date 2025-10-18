@@ -8,18 +8,18 @@ defaults:
 
 actor_rollout_ref:
   rollout:
-    mode: async # only async is supported
+    mode: async
     agent:
-      num_workers: 0 # we bypass the agent loop
+      num_workers: 0
     val_kwargs:
-      do_sample: True # if do_sample is False, temperature is overridden to 0.0
+      do_sample: True
 
 data:
   gen_batch_size: ${mul:${data.train_batch_size},${rllm.rejection_sample.multiplier}}
 
 rllm:
   agent:
-    name: miniwobagent
+    name: math_agent
     max_steps: 20
     trajectory_timeout: null
     overlong_filter: False
@@ -32,15 +32,17 @@ rllm:
     use_workflow: False
     name: single_turn_workflow
     workflow_args:
-      max_prompt_length: ${data.max_prompt_length}
-      max_response_length: ${data.max_response_length}
+      agent_cls: null
+      agent_args: {}
+      env_cls: null
+      env_args: {}
       timeout: 1e6
       gamma: 0.0 # no discounting
       reward_bonus_coeff: 0.0 # no reward shaping
-      accumulate_response_length: null # defaults to not rllm.stepwise_advantage.enable
     n_parallel_tasks: 256
     retry_limit: 3
   disable_thinking: False
+  accumulate_reasoning: False
   mask_truncated_samples: False
   stepwise_advantage:
     enable: False
@@ -50,8 +52,16 @@ rllm:
     enable: False
     mask_max_prompt_length_exceeded: True
     mask_max_response_length_exceeded: True
+    mask_env_done: False
     mask_max_turns_exceeded: True
     mask_timeout: True
+    mask_unknown: False
+    mask_error: True
   rejection_sample:
     enable: False
     multiplier: 1
+
+fireworks:
+  deployment_id: null
+  model_id_prefix: test-model
+  concurrency: 32

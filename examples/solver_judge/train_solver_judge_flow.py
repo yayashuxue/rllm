@@ -16,8 +16,6 @@ def main(config):
         workflow_args={
             "n_solutions": 2,
             "reward_function": countdown_reward_fn,
-            "max_prompt_length": config.data.max_prompt_length,
-            "max_response_length": config.data.max_response_length,
         },
         config=config,
         train_dataset=train_dataset,

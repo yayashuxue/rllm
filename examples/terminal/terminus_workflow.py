@@ -52,7 +52,7 @@ class TerminalTerminusWorkflow(Workflow):
         finally:
             await self.run_in_executor(self._close_env)
 
-        episode = Episode(id=uid, task=task, is_correct=bool(reward > 0), trajectories=[("terminus", trajectory)])
+        episode = Episode(id=uid, task=task, is_correct=bool(reward > 0), trajectories=[trajectory])
         episode.termination_reason = termination_reason
         return episode
 

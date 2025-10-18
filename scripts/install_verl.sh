@@ -2,15 +2,15 @@
 # Adapted from https://github.com/volcengine/verl/blob/v0.5.0/scripts/install_vllm_sglang_mcore.sh
 
 echo "1. install inference frameworks and pytorch they need"
-pip install "sglang[all]==0.4.6.post1" --no-cache-dir --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python && pip install torch-memory-saver --no-cache-dir
+pip install "sglang[all]==0.4.6.post5" --no-cache-dir --find-links https://flashinfer.ai/whl/cu124/torch2.6/flashinfer-python && pip install torch-memory-saver --no-cache-dir
 pip install --no-cache-dir "vllm==0.8.5.post1" "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0" "tensordict==0.6.2" torchdata
 
 
 echo "2. install basic packages"
 pip install "transformers[hf_xet]>=4.51.0" accelerate datasets peft hf-transfer \
-    "numpy<2.0.0" "pyarrow>=15.0.0" pandas \
-    ray[default] codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler \
-    pytest py-spy pyext pre-commit ruff tensorboard 
+    "numpy<2.0.0" "pyarrow>=19.0.1" pandas \
+    "ray[default]" codetiming hydra-core pylatexenc qwen-vl-utils wandb dill pybind11 liger-kernel mathruler blobfile xgrammar \
+    pytest py-spy pyext pre-commit ruff
 
 pip install "nvidia-ml-py>=12.560.30" "fastapi[standard]>=0.115.0" "optree>=0.13.0" "pydantic>=2.9" "grpcio>=1.62.1"
 
@@ -34,4 +34,4 @@ pip install opencv-fixer && \
 
 
 echo "5. Install verl"
-pip install --no-deps --no-cache-dir git+https://github.com/volcengine/verl.git@v0.5.0
+pip install --no-deps -e verl/

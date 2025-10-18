@@ -110,7 +110,7 @@ class GaiaEvaluator:
             if not episode or not episode.trajectories:
                 raise Exception("No episode or trajectory returned")
 
-            trajectory = episode.trajectories[0][1]
+            trajectory = episode.trajectories[0]
             model_response = self._extract_response_from_trajectory(trajectory)
             is_correct, f1_score, exact_match = self._calculate_metrics(model_response, sample.answer)
             tool_usage = self._extract_tool_usage_from_trajectory(trajectory)

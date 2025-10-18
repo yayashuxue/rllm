@@ -27,7 +27,7 @@ def save_episode_to_json(episode, output_dir="./strands_outputs"):
     os.makedirs(output_dir, exist_ok=True)
 
     # Get trajectory data from episode
-    trajectory = episode.trajectories[0][1] if episode.trajectories else None
+    trajectory = episode.trajectories[0] if episode.trajectories else None
     if not trajectory:
         print("❌ No trajectory found in episode")
         return None
@@ -183,8 +183,8 @@ async def run_strands_workflow(rollout_engine):
 
     # Display concise episode summary
     print(f"\n✅ Episode {episode.id} completed")
-    for agent_name, trajectory in episode.trajectories:
-        print(f"📊 {agent_name}: {len(trajectory.steps)} steps, reward: {trajectory.reward}")
+    for trajectory in episode.trajectories:
+        print(f"📊 {trajectory.agent_name}: {len(trajectory.steps)} steps, reward: {trajectory.reward}")
 
 
 async def main():

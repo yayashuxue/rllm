@@ -202,3 +202,10 @@ CLAUDE.md
 examples/strands_outputs/*
 strands_outputs/*
 examples/strands/strands_outputs/*
+
+# Deepresearch outputs ignore
+examples/deepresearch/deepresearch_outputs/*
+deepresearch_outputs/*
+examples/deepresearch/hle_outputs/*
+*/hle_outputs/*
+examples/deepresearch/HLE_OUTPUT_EVOLUTION.md

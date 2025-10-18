@@ -12,7 +12,6 @@ class StrandsWorkflow(Workflow):
 
         # Create initial agent
         self.agent = self.agent_cls(**self.agent_args)
-        self.register_agent(self.agent)
 
     async def run(self, task: dict, uid: str, **kwargs) -> Episode | None:
         # Use parent's reset method for proper workflow pooling
@@ -22,7 +21,7 @@ class StrandsWorkflow(Workflow):
         self.agent.reset_trajectory(task=task_text)
 
         result = self.agent(task_text)
-        self.commit("strands_agent", self.agent, reset=False)
+        self.commit(agent=self.agent, reset=False)
 
         if hasattr(result, "stop_reason") and result.stop_reason in ["end_turn", "stop_sequence"]:
             raise TerminationEvent(TerminationReason.ENV_DONE)
@@ -35,11 +34,9 @@ class StrandsWorkflow(Workflow):
         self.uid = uid
         self.task = task
         self._completed_trajectories = []
-        self._termination_buffer = None
 
         # Create completely fresh agent instance for zero state contamination
         self.agent = self.agent_cls(**self.agent_args)
-        self.register_agent(self.agent)
 
         return None  # No environment to return
 
